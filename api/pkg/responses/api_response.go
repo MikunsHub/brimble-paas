@@ -9,25 +9,25 @@ type Meta struct {
 }
 
 type ApiResponse struct {
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-	Status  string      `json:"status,omitempty"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+	Status  string `json:"status,omitempty"`
 }
 
 type ApiResponsePaginated struct {
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-	Meta    Meta        `json:"meta"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+	Meta    Meta   `json:"meta"`
 }
 
-func NewApiResponse(message string, data interface{}) ApiResponse {
+func NewApiResponse(message string, data any) ApiResponse {
 	return ApiResponse{
 		Message: message,
 		Data:    data,
 	}
 }
 
-func NewApiResponsePaginated(message string, data interface{}, meta Meta) ApiResponsePaginated {
+func NewApiResponsePaginated(message string, data any, meta Meta) ApiResponsePaginated {
 	return ApiResponsePaginated{
 		Message: message,
 		Data:    data,

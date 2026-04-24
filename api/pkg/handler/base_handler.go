@@ -2,11 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	apperrors "github.com/brimble/paas/pkg/errors"
 	"github.com/brimble/paas/pkg/responses"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -18,15 +20,15 @@ type BaseHandler struct {
 	Logger *slog.Logger
 }
 
-func (h *BaseHandler) OK(c *gin.Context, message string, data interface{}) {
+func (h *BaseHandler) OK(c *gin.Context, message string, data any) {
 	c.JSON(http.StatusOK, responses.NewApiResponse(message, data))
 }
 
-func (h *BaseHandler) Created(c *gin.Context, message string, data interface{}) {
+func (h *BaseHandler) Created(c *gin.Context, message string, data any) {
 	c.JSON(http.StatusCreated, responses.NewApiResponse(message, data))
 }
 
-func (h *BaseHandler) OKPaginated(c *gin.Context, message string, data interface{}, meta responses.Meta) {
+func (h *BaseHandler) OKPaginated(c *gin.Context, message string, data any, meta responses.Meta) {
 	c.JSON(http.StatusOK, responses.NewApiResponsePaginated(message, data, meta))
 }
 
@@ -42,7 +44,21 @@ func (h *BaseHandler) InternalError(c *gin.Context, message string) {
 	c.JSON(http.StatusInternalServerError, responses.NewApiResponse(message, nil))
 }
 
-func (h *BaseHandler) BindJSON(c *gin.Context, req interface{}) bool {
+// HandleErr inspects err and writes the appropriate HTTP response.
+// AppError types map directly to their status code.
+// Any other error is treated as a 500 and logged — its details are never
+// exposed to the client.
+func (h *BaseHandler) HandleErr(c *gin.Context, err error) {
+	var appErr *apperrors.AppError
+	if errors.As(err, &appErr) {
+		c.JSON(appErr.Code, responses.NewApiResponse(appErr.Message, nil))
+		return
+	}
+	h.Logger.Error("unhandled error", "error", err.Error(), "path", c.FullPath())
+	c.JSON(http.StatusInternalServerError, responses.NewApiResponse("internal server error", nil))
+}
+
+func (h *BaseHandler) BindJSON(c *gin.Context, req any) bool {
 	if err := c.ShouldBindJSON(req); err != nil {
 		h.BadRequest(c, formatBindError(err))
 		return false

@@ -4,7 +4,9 @@ import (
 	"os"
 
 	"github.com/brimble/paas/config"
+	"github.com/brimble/paas/internal/deployment"
 	"github.com/brimble/paas/internal/routes"
+	"github.com/brimble/paas/pkg/broker"
 	"github.com/brimble/paas/pkg/handler"
 	"github.com/brimble/paas/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -23,6 +25,11 @@ func main() {
 	}
 	logger.Info("database connection established")
 
+	logBroker := broker.NewChannelBroker()
+
+	deploymentRepo := deployment.NewDeploymentRepo(db)
+	deploymentSvc := deployment.NewDeploymentService(deploymentRepo, logBroker, cfg)
+
 	base := &handler.BaseHandler{
 		DB:     db,
 		Logger: appLogger,
@@ -35,7 +42,10 @@ func main() {
 	r.Use(logger.GinMiddleware(appLogger, cfg.Env))
 	r.SetTrustedProxies(nil)
 
-	routes.Register(r, base)
+	routes.Register(r, routes.Deps{
+		Base:          base,
+		DeploymentSvc: deploymentSvc,
+	})
 
 	logger.Info("server listening", "port", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {

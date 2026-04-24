@@ -6,12 +6,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Register(r *gin.Engine, base *handler.BaseHandler) {
+type Deps struct {
+	Base          *handler.BaseHandler
+	DeploymentSvc deployment.Service
+}
+
+func Register(r *gin.Engine, deps Deps) {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	deployHandler := deployment.NewHandler(base, nil)
+	deployHandler := deployment.NewDeploymentHandler(deps.Base, deps.DeploymentSvc)
 
 	api := r.Group("/api")
 	{

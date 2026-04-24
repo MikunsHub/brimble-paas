@@ -154,7 +154,7 @@ func GinMiddleware(logger *slog.Logger, environment string) gin.HandlerFunc {
 		if statusCode >= 400 {
 			responseBody := bodyWriter.body.String()
 			if responseBody != "" {
-				var apiResponse map[string]interface{}
+				var apiResponse map[string]any
 				if err := json.Unmarshal([]byte(responseBody), &apiResponse); err == nil {
 					if message, exists := apiResponse["message"]; exists {
 						if msgStr, ok := message.(string); ok && msgStr != "" {
@@ -254,8 +254,8 @@ var sensitiveHeaders = map[string]bool{
 	"set-cookie":    true,
 }
 
-func redactHeaders(headers map[string][]string) map[string]interface{} {
-	redacted := make(map[string]interface{})
+func redactHeaders(headers map[string][]string) map[string]any {
+	redacted := make(map[string]any)
 	for key, values := range headers {
 		if sensitiveHeaders[strings.ToLower(key)] {
 			redacted[key] = "REDACTED"
