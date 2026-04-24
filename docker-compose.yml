@@ -1,0 +1,114 @@
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "2019:2019"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - brimble-network
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles:
+      - backend
+    ports:
+      - "8080:8080"
+    environment:
+      - LOG_BROKER=channel
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=brimble
+      - DB_PASSWORD=brimble
+      - DB_NAME=brimble
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - S3_BUCKET=brimble-deployments
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - DOMAIN=brimble.test
+      - CADDY_ADMIN_URL=http://caddy:2019
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - brimble-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: brimble
+      POSTGRES_PASSWORD: brimble
+      POSTGRES_DB: brimble
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - brimble-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brimble -d brimble"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3
+    restart: unless-stopped
+    environment:
+      - SERVICES=s3
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+    networks:
+      - brimble-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep '\"s3\": \"available\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles:
+      - redis
+    networks:
+      - brimble-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    command: ["-js"]
+    profiles:
+      - nats
+    networks:
+      - brimble-network
+
+networks:
+  brimble-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  localstack_data:

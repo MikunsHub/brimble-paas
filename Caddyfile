@@ -1,0 +1,16 @@
+{
+	# Admin API on :2019 (internal only — not exposed to the internet)
+	admin :2019
+}
+
+:80 {
+	# API — wired in once the backend service is running
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	# Frontend — wired in once the frontend service is running
+	handle {
+		reverse_proxy frontend:5173
+	}
+}
