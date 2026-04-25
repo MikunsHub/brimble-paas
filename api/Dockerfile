@@ -12,7 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/app
 
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates curl
+RUN apk add --no-cache ca-certificates curl git docker-cli bash && \
+    curl -fsSL https://railpack.io/install.sh | bash
 
 WORKDIR /app
 COPY --from=builder /app/server .

@@ -1,5 +1,5 @@
 .PHONY: generate-module test-prod test-prod-setup test-prod-run test-prod-cleanup check-health fetch-staging-db
--include .env
+-include api/.env
 export
 
 DB_URL="postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)"

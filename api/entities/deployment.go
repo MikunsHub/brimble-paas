@@ -23,6 +23,8 @@ type Deployment struct {
 	ContainerID   *string          `json:"container_id"   gorm:"column:container_id"`
 	ContainerAddr *string          `json:"container_addr" gorm:"column:container_addr"`
 	LiveURL       *string          `json:"live_url"       gorm:"column:live_url"`
+	DetectedLang  *string          `json:"detected_lang"  gorm:"column:detected_lang"`
+	StartCmd      *string          `json:"start_cmd"      gorm:"column:start_cmd"`
 	CreatedAt     time.Time        `json:"created_at"     gorm:"autoCreateTime"`
 	UpdatedAt     time.Time        `json:"updated_at"     gorm:"autoUpdateTime"`
 }

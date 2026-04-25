@@ -2,9 +2,12 @@ package deployment
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/brimble/paas/config"
 	"github.com/brimble/paas/entities"
+	"github.com/brimble/paas/internal/builder"
 	"github.com/brimble/paas/internal/naming"
 	"github.com/brimble/paas/pkg/broker"
 	apperrors "github.com/brimble/paas/pkg/errors"
@@ -20,13 +23,14 @@ type Service interface {
 }
 
 type deploymentService struct {
-	repo   Repository
-	broker broker.LogPublisher
-	cfg    *config.Config
+	repo       Repository
+	broker     broker.LogPublisher
+	builderSvc *builder.BuilderService
+	cfg        *config.Config
 }
 
-func NewDeploymentService(repo Repository, b broker.LogPublisher, cfg *config.Config) Service {
-	return &deploymentService{repo: repo, broker: b, cfg: cfg}
+func NewDeploymentService(repo Repository, b broker.LogPublisher, builderSvc *builder.BuilderService, cfg *config.Config) Service {
+	return &deploymentService{repo: repo, broker: b, builderSvc: builderSvc, cfg: cfg}
 }
 
 func (s *deploymentService) Create(ctx context.Context, req CreateDeploymentRequest) (*entities.Deployment, error) {
@@ -99,13 +103,57 @@ func (s *deploymentService) GetLogs(ctx context.Context, id string, offset int) 
 }
 
 // runPipeline is launched as a goroutine after a deployment record is created.
-// Phases: source acquisition → Railpack build → Docker run → health check → Caddy route.
+// Phases: clone → build → (run container → health check → Caddy route — TODO).
 func (s *deploymentService) runPipeline(d *entities.Deployment) {
 	ctx := context.Background()
 	logger.Info("pipeline started", "id", d.ID, "subdomain", d.Subdomain)
 
 	d.Status = entities.StatusBuilding
 	if err := s.repo.Update(ctx, d); err != nil {
-		logger.Error(err, "pipeline: failed to update status", "id", d.ID)
+		logger.Error(err, "pipeline: failed to update status to building", "id", d.ID)
+	}
+
+	sourceDir, err := os.MkdirTemp("", "brimble-"+d.ID+"-")
+	if err != nil {
+		s.failPipeline(ctx, d, fmt.Errorf("failed to create temp dir: %w", err))
+		return
+	}
+	defer os.RemoveAll(sourceDir)
+
+	if err := s.builderSvc.Clone(ctx, *d.GitURL, sourceDir, d.ID); err != nil {
+		s.failPipeline(ctx, d, fmt.Errorf("clone: %w", err))
+		return
+	}
+
+	imageTag := d.Subdomain + ":latest"
+	info, err := s.builderSvc.Build(ctx, sourceDir, imageTag, d.ID)
+	if err != nil {
+		s.failPipeline(ctx, d, fmt.Errorf("build: %w", err))
+		return
+	}
+
+	d.ImageTag = &imageTag
+	if info.DetectedLang != "" {
+		d.DetectedLang = &info.DetectedLang
+	}
+	if info.StartCmd != "" {
+		d.StartCmd = &info.StartCmd
+	}
+
+	d.Status = entities.StatusDeploying
+	if err := s.repo.Update(ctx, d); err != nil {
+		logger.Error(err, "pipeline: failed to update deployment after build", "id", d.ID)
+		return
+	}
+
+	logger.Info("build complete, deployment queued for run", "id", d.ID,
+		"imageTag", imageTag, "lang", info.DetectedLang)
+}
+
+func (s *deploymentService) failPipeline(ctx context.Context, d *entities.Deployment, err error) {
+	logger.Error(err, "pipeline failed", "id", d.ID)
+	d.Status = entities.StatusFailed
+	if updateErr := s.repo.Update(ctx, d); updateErr != nil {
+		logger.Error(updateErr, "pipeline: failed to set status to failed", "id", d.ID)
 	}
 }

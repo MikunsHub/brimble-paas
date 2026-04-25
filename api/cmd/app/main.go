@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/brimble/paas/config"
+	"github.com/brimble/paas/internal/builder"
 	"github.com/brimble/paas/internal/deployment"
 	"github.com/brimble/paas/internal/routes"
 	"github.com/brimble/paas/pkg/broker"
@@ -28,7 +29,15 @@ func main() {
 	logBroker := broker.NewChannelBroker()
 
 	deploymentRepo := deployment.NewDeploymentRepo(db)
-	deploymentSvc := deployment.NewDeploymentService(deploymentRepo, logBroker, cfg)
+
+	builderSvc := builder.NewBuilderService(cfg.BuildMode, logBroker, deploymentRepo)
+	if err := builderSvc.Validate(); err != nil {
+		logger.Error(err, "builder validation failed")
+		os.Exit(1)
+	}
+	logger.Info("builder ready", "mode", builderSvc.String())
+
+	deploymentSvc := deployment.NewDeploymentService(deploymentRepo, logBroker, builderSvc, cfg)
 
 	base := &handler.BaseHandler{
 		DB:     db,

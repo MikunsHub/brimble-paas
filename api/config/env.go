@@ -22,6 +22,7 @@ type Config struct {
 	DockerHost     string `env:"DOCKER_HOST"           envDefault:"unix:///var/run/docker.sock"`
 	Domain         string `env:"DOMAIN"                envDefault:"brimble.test"`
 	CaddyAdminURL  string `env:"CADDY_ADMIN_URL"       envDefault:"http://localhost:2019"`
+	BuildMode      string `env:"BUILD_MODE"            envDefault:"dev"` // dev | prod
 }
 
 func Load() *Config {
