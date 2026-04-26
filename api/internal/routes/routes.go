@@ -22,6 +22,7 @@ func Register(r *gin.Engine, deps Deps) {
 	{
 		deploys := api.Group("/deployments")
 		{
+			deploys.POST("/upload-url", deployHandler.CreateUploadURL)
 			deploys.POST("", deployHandler.Create)
 			deploys.GET("", deployHandler.List)
 			deploys.GET("/:id", deployHandler.Get)

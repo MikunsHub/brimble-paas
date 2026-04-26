@@ -33,3 +33,10 @@ go.work.sum
 
 .air.toml
 docs
+
+# Skills directories
+**/skills/
+skills-lock.json
+
+test_static
+postman

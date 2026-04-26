@@ -31,6 +31,21 @@ func (h *Handler) Create(c *gin.Context) {
 	h.Created(c, "deployment created", toDeploymentResponse(d))
 }
 
+func (h *Handler) CreateUploadURL(c *gin.Context) {
+	var req CreateUploadURLRequest
+	if !h.BindJSON(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.CreateUploadURL(c.Request.Context(), req)
+	if err != nil {
+		h.HandleErr(c, err)
+		return
+	}
+
+	h.Created(c, "upload url created", resp)
+}
+
 func (h *Handler) List(c *gin.Context) {
 	deployments, err := h.svc.List(c.Request.Context())
 	if err != nil {

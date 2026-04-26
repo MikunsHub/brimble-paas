@@ -7,7 +7,19 @@ import (
 )
 
 type CreateDeploymentRequest struct {
-	GitURL *string `json:"git_url"`
+	GitURL   *string `json:"git_url"`
+	FilePath *string `json:"file_path"`
+}
+
+type CreateUploadURLRequest struct {
+	FileName    string `json:"file_name"`
+	ContentType string `json:"content_type"`
+}
+
+type CreateUploadURLResponse struct {
+	FilePath string `json:"file_path"`
+	URL      string `json:"url"`
+	Method   string `json:"method"`
 }
 
 type DeploymentResponse struct {

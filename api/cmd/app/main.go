@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/brimble/paas/config"
@@ -9,6 +10,7 @@ import (
 	"github.com/brimble/paas/internal/deployment"
 	"github.com/brimble/paas/internal/docker"
 	"github.com/brimble/paas/internal/routes"
+	s3client "github.com/brimble/paas/pkg/aws/s3"
 	"github.com/brimble/paas/pkg/broker"
 	"github.com/brimble/paas/pkg/handler"
 	"github.com/brimble/paas/pkg/logger"
@@ -46,6 +48,22 @@ func main() {
 	}
 
 	caddySvc := caddy.NewCaddyService(cfg.CaddyAdminURL, cfg.Domain)
+	s3, err := s3client.NewClient(
+		context.Background(),
+		cfg.AWSRegion,
+		cfg.AWSEndpointURL,
+		cfg.AWSAccessKeyID,
+		cfg.AWSSecretKey,
+		cfg.S3Bucket,
+	)
+	if err != nil {
+		logger.Error(err, "failed to create s3 client")
+		os.Exit(1)
+	}
+	if err := s3.EnsureBucket(context.Background()); err != nil {
+		logger.Error(err, "failed to ensure source bucket")
+		os.Exit(1)
+	}
 
 	deploymentSvc := deployment.NewDeploymentService(
 		deploymentRepo,
@@ -53,6 +71,7 @@ func main() {
 		builderSvc,
 		dockerSvc,
 		caddySvc,
+		s3,
 		cfg,
 	)
 
