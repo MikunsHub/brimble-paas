@@ -20,13 +20,14 @@ type Config struct {
 	AWSRegion      string `env:"AWS_REGION"            envDefault:"us-east-1"`
 	S3Bucket       string `env:"S3_BUCKET"             envDefault:"brimble-deployments"`
 	DockerHost     string `env:"DOCKER_HOST"           envDefault:"unix:///var/run/docker.sock"`
+	DockerNetwork  string `env:"DOCKER_NETWORK"        envDefault:"brimble-paas_brimble-network"`
 	Domain         string `env:"DOMAIN"                envDefault:"brimble.test"`
 	CaddyAdminURL  string `env:"CADDY_ADMIN_URL"       envDefault:"http://localhost:2019"`
 	BuildMode      string `env:"BUILD_MODE"            envDefault:"dev"` // dev | prod
 }
 
 func Load() *Config {
-	_ = godotenv.Load() // load .env if present — silent no-op in production
+	_ = godotenv.Load()
 
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {

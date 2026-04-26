@@ -36,6 +36,7 @@ services:
       - CADDY_ADMIN_URL=http://caddy:2019
       - BUILD_MODE=dev
       - BUILDKIT_HOST=docker-container://buildkit
+      - DOCKER_NETWORK=brimble-paas_brimble-network
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:

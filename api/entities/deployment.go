@@ -25,6 +25,7 @@ type Deployment struct {
 	LiveURL       *string          `json:"live_url"       gorm:"column:live_url"`
 	DetectedLang  *string          `json:"detected_lang"  gorm:"column:detected_lang"`
 	StartCmd      *string          `json:"start_cmd"      gorm:"column:start_cmd"`
+	ErrorMessage  *string          `json:"error_message"  gorm:"column:error_message"`
 	CreatedAt     time.Time        `json:"created_at"     gorm:"autoCreateTime"`
 	UpdatedAt     time.Time        `json:"updated_at"     gorm:"autoUpdateTime"`
 }

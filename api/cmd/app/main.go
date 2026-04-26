@@ -5,7 +5,9 @@ import (
 
 	"github.com/brimble/paas/config"
 	"github.com/brimble/paas/internal/builder"
+	"github.com/brimble/paas/internal/caddy"
 	"github.com/brimble/paas/internal/deployment"
+	"github.com/brimble/paas/internal/docker"
 	"github.com/brimble/paas/internal/routes"
 	"github.com/brimble/paas/pkg/broker"
 	"github.com/brimble/paas/pkg/handler"
@@ -37,7 +39,22 @@ func main() {
 	}
 	logger.Info("builder ready", "mode", builderSvc.String())
 
-	deploymentSvc := deployment.NewDeploymentService(deploymentRepo, logBroker, builderSvc, cfg)
+	dockerSvc, err := docker.NewDockerService(cfg.DockerHost, cfg.DockerNetwork)
+	if err != nil {
+		logger.Error(err, "failed to create docker service")
+		os.Exit(1)
+	}
+
+	caddySvc := caddy.NewCaddyService(cfg.CaddyAdminURL, cfg.Domain)
+
+	deploymentSvc := deployment.NewDeploymentService(
+		deploymentRepo,
+		logBroker,
+		builderSvc,
+		dockerSvc,
+		caddySvc,
+		cfg,
+	)
 
 	base := &handler.BaseHandler{
 		DB:     db,

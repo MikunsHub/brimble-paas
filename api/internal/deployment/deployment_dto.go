@@ -11,12 +11,13 @@ type CreateDeploymentRequest struct {
 }
 
 type DeploymentResponse struct {
-	ID        string  `json:"id"`
-	Status    string  `json:"status"`
-	Subdomain string  `json:"subdomain"`
-	LiveURL   *string `json:"live_url,omitempty"`
-	ImageTag  *string `json:"image_tag,omitempty"`
-	CreatedAt string  `json:"created_at"`
+	ID           string  `json:"id"`
+	Status       string  `json:"status"`
+	Subdomain    string  `json:"subdomain"`
+	LiveURL      *string `json:"live_url,omitempty"`
+	ImageTag     *string `json:"image_tag,omitempty"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+	CreatedAt    string  `json:"created_at"`
 }
 
 type LogResponse struct {
@@ -30,12 +31,13 @@ type LogResponse struct {
 
 func toDeploymentResponse(d *entities.Deployment) DeploymentResponse {
 	return DeploymentResponse{
-		ID:        d.ID,
-		Status:    string(d.Status),
-		Subdomain: d.Subdomain,
-		LiveURL:   d.LiveURL,
-		ImageTag:  d.ImageTag,
-		CreatedAt: d.CreatedAt.Format(time.RFC3339),
+		ID:           d.ID,
+		Status:       string(d.Status),
+		Subdomain:    d.Subdomain,
+		LiveURL:      d.LiveURL,
+		ImageTag:     d.ImageTag,
+		ErrorMessage: d.ErrorMessage,
+		CreatedAt:    d.CreatedAt.Format(time.RFC3339),
 	}
 }
 
