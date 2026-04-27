@@ -86,3 +86,9 @@ The main design split is simple:
 - Caddy is the traffic entrypoint.
 - Docker is the runtime.
 - Railpack + Buildx are the build path.
+
+## Explanation link
+1: https://www.loom.com/share/05ff44400f044baa8b3907df91c827ff
+2: https://www.loom.com/share/c7794edfbf4a44ebb63e313cb02ce645
+
+Both videos total 10 mins and had to be split into 2 because of Loom
