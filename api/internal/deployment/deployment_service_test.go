@@ -1,9 +1,13 @@
 package deployment
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +18,7 @@ import (
 	"github.com/brimble/paas/internal/deployment/builder"
 	"github.com/brimble/paas/pkg/broker"
 	apperrors "github.com/brimble/paas/pkg/errors"
+	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -632,6 +637,8 @@ func TestDeploymentHelpers(t *testing.T) {
 	})
 }
 
+func strPtr(s string) *string { return &s }
+
 func newTestDeploymentService(repo Repository, b broker.LogPublisher, builderSvc Builder, dockerSvc DockerManager, router Router, s3 s3API) *deploymentService {
 	return &deploymentService{
 		repo:       repo,
@@ -695,4 +702,747 @@ func TestDownloadObjectToFile(t *testing.T) {
 
 	path := t.TempDir() + "/archive.txt"
 	require.NoError(t, svc.downloadObjectToFile(context.Background(), "key", path))
+}
+
+func TestDownloadObjectToFile_CreateError(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestDeploymentService(&mockRepo{}, &mockBroker{}, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{
+		downloadFunc: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("data")), nil
+		},
+	})
+
+	err := svc.downloadObjectToFile(context.Background(), "key", "/nonexistent/dir/file.txt")
+	require.Error(t, err)
+}
+
+func TestNewDeploymentService(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{}
+	b := &mockBroker{}
+	builderSvc := &mockBuilder{}
+	dockerSvc := &mockDocker{}
+	router := &mockRouter{}
+	s3 := &mockS3{}
+	cfg := &config.Config{Domain: "test.com"}
+
+	svc := NewDeploymentService(repo, b, builderSvc, dockerSvc, router, s3, cfg)
+	require.NotNil(t, svc)
+
+	ds, ok := svc.(*deploymentService)
+	require.True(t, ok)
+	assert.Equal(t, repo, ds.repo)
+	assert.Equal(t, b, ds.broker)
+	assert.Equal(t, builderSvc, ds.builderSvc)
+	assert.Equal(t, dockerSvc, ds.dockerSvc)
+	assert.Equal(t, router, ds.caddySvc)
+	assert.Equal(t, s3, ds.s3)
+	assert.Equal(t, cfg, ds.cfg)
+}
+
+func TestRunPipeline_BuildError(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, _ string, destDir, _ string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+		buildFunc: func(context.Context, string, string, string) (*builder.BuildInfo, error) {
+			return nil, errors.New("build failed")
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, &mockDocker{}, &mockRouter{}, &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error { return nil },
+	})
+	d := &entities.Deployment{ID: "dep_pipe_docker", Subdomain: "demo", Status: entities.StatusPending, GitURL: &gitURL}
+
+	svc.runPipeline(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+	require.NotNil(t, last.ErrorMessage)
+	assert.Contains(t, *last.ErrorMessage, "build failed")
+}
+
+func TestRunPipeline_DockerRunError(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, _ string, destDir, _ string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+		buildFunc: func(context.Context, string, string, string) (*builder.BuildInfo, error) {
+			return &builder.BuildInfo{}, nil
+		},
+	}
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "", "", errors.New("docker run failed")
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, dockerSvc, &mockRouter{}, &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error { return nil },
+	})
+	d := &entities.Deployment{ID: "dep_pipe_health", Subdomain: "demo", Status: entities.StatusPending, GitURL: &gitURL}
+
+	svc.runPipeline(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+	require.NotNil(t, last.ErrorMessage)
+	assert.Contains(t, *last.ErrorMessage, "docker run failed")
+}
+
+func TestRunPipeline_HealthCheckError(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, _ string, destDir, _ string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+		buildFunc: func(context.Context, string, string, string) (*builder.BuildInfo, error) {
+			return &builder.BuildInfo{}, nil
+		},
+	}
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error {
+			return errors.New("unhealthy")
+		},
+		stopContainerFunc: func(context.Context, string) error { return nil },
+		getContainerLogsFunc: func(context.Context, string) (string, error) {
+			return "crash logs", nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, dockerSvc, &mockRouter{}, &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error { return nil },
+	})
+	d := &entities.Deployment{ID: "dep_pipe_caddy", Subdomain: "demo", Status: entities.StatusPending, GitURL: &gitURL}
+
+	svc.runPipeline(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+	require.NotNil(t, last.ErrorMessage)
+	assert.Contains(t, *last.ErrorMessage, "health check failed")
+}
+
+func TestRunPipeline_CaddyError(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, _ string, destDir, _ string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+		buildFunc: func(context.Context, string, string, string) (*builder.BuildInfo, error) {
+			return &builder.BuildInfo{}, nil
+		},
+	}
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error { return nil },
+		stopContainerFunc:  func(context.Context, string) error { return nil },
+	}
+	router := &mockRouter{
+		addRouteFunc: func(context.Context, string, string) error {
+			return errors.New("caddy failed")
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, dockerSvc, router, &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error { return nil },
+	})
+	d := &entities.Deployment{ID: "dep_pipe_success", Subdomain: "demo", Status: entities.StatusPending, GitURL: &gitURL}
+
+	svc.runPipeline(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+	require.NotNil(t, last.ErrorMessage)
+	assert.Contains(t, *last.ErrorMessage, "caddy route")
+}
+
+func TestRunPipeline_Success(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, _ string, destDir, _ string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+		buildFunc: func(context.Context, string, string, string) (*builder.BuildInfo, error) {
+			return &builder.BuildInfo{DetectedLang: "go", StartCmd: "./app"}, nil
+		},
+	}
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error { return nil },
+		streamContainerLogsFn: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(&emptyReader{}), nil
+		},
+	}
+	router := &mockRouter{addRouteFunc: func(context.Context, string, string) error { return nil }}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, dockerSvc, router, &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error { return nil },
+	})
+	d := &entities.Deployment{ID: "dep_pipe", Subdomain: "demo", Status: entities.StatusPending, GitURL: &gitURL}
+
+	svc.runPipeline(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusRunning, last.Status)
+	require.NotNil(t, last.LiveURL)
+	assert.Contains(t, *last.LiveURL, "demo.")
+	require.NotNil(t, last.ContainerID)
+	assert.Equal(t, "container123", *last.ContainerID)
+	require.NotNil(t, last.ImageTag)
+	assert.Equal(t, "demo:latest", *last.ImageTag)
+	require.NotNil(t, last.DetectedLang)
+	assert.Equal(t, "go", *last.DetectedLang)
+	require.NotNil(t, last.StartCmd)
+	assert.Equal(t, "./app", *last.StartCmd)
+}
+
+func TestRunFromImage_DockerError(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	imageTag := "demo:latest"
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "", "", errors.New("docker failed")
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, &mockRouter{}, &mockS3{})
+	d := &entities.Deployment{ID: "dep_img", Subdomain: "demo", Status: entities.StatusStopped, ImageTag: &imageTag}
+
+	svc.runFromImage(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+}
+
+func TestRunFromImage_HealthCheckError(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	imageTag := "demo:latest"
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error {
+			return errors.New("unhealthy")
+		},
+		stopContainerFunc:    func(context.Context, string) error { return nil },
+		getContainerLogsFunc: func(context.Context, string) (string, error) { return "", nil },
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, &mockRouter{}, &mockS3{})
+	d := &entities.Deployment{ID: "dep_img", Subdomain: "demo", Status: entities.StatusStopped, ImageTag: &imageTag}
+
+	svc.runFromImage(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+}
+
+func TestRunFromImage_CaddyError(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	imageTag := "demo:latest"
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error { return nil },
+		stopContainerFunc:  func(context.Context, string) error { return nil },
+	}
+	router := &mockRouter{
+		addRouteFunc: func(context.Context, string, string) error {
+			return errors.New("caddy failed")
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, router, &mockS3{})
+	d := &entities.Deployment{ID: "dep_img", Subdomain: "demo", Status: entities.StatusStopped, ImageTag: &imageTag}
+
+	svc.runFromImage(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusFailed, last.Status)
+}
+
+func TestRunFromImage_Success(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	imageTag := "demo:latest"
+	dockerSvc := &mockDocker{
+		runContainerFunc: func(context.Context, string, string) (string, string, error) {
+			return "container123", "10.0.0.1:8000", nil
+		},
+		waitForHealthyFunc: func(context.Context, string, time.Duration) error { return nil },
+		streamContainerLogsFn: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(&emptyReader{}), nil
+		},
+	}
+	router := &mockRouter{addRouteFunc: func(context.Context, string, string) error { return nil }}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, router, &mockS3{})
+	d := &entities.Deployment{ID: "dep_img", Subdomain: "demo", Status: entities.StatusStopped, ImageTag: &imageTag}
+
+	svc.runFromImage(d)
+
+	require.NotEmpty(t, repo.updated)
+	last := repo.updated[len(repo.updated)-1]
+	assert.Equal(t, entities.StatusRunning, last.Status)
+	require.NotNil(t, last.LiveURL)
+	assert.Contains(t, *last.LiveURL, "demo.")
+}
+
+func TestAcquireSource_S3Path(t *testing.T) {
+	t.Parallel()
+
+	s3Key := "uploads/app.zip"
+	downloaded := false
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	s3 := &mockS3{
+		downloadFunc: func(_ context.Context, key string) (io.ReadCloser, error) {
+			assert.Equal(t, s3Key, key)
+			// Create a minimal valid zip in memory
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			f, _ := zw.Create("readme.txt")
+			f.Write([]byte("hello"))
+			zw.Close()
+			downloaded = true
+			return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, &mockDocker{}, &mockRouter{}, s3)
+	d := &entities.Deployment{ID: "dep_src", S3Key: &s3Key}
+	sourceDir := t.TempDir()
+
+	err := svc.acquireSource(context.Background(), d, sourceDir)
+	require.NoError(t, err)
+	assert.True(t, downloaded)
+
+	// Verify zip was extracted
+	content, err := os.ReadFile(filepath.Join(sourceDir, "readme.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(content))
+}
+
+func TestAcquireSource_GitPath(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	cloned := false
+	uploaded := false
+	repo := &mockRepo{updateFunc: func(context.Context, *entities.Deployment) error { return nil }}
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, url, destDir, deploymentID string) error {
+			assert.Equal(t, gitURL, url)
+			cloned = true
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+	}
+	s3 := &mockS3{
+		uploadFunc: func(_ context.Context, key string, body io.Reader, contentType string) error {
+			assert.Contains(t, key, "/source.tar.gz")
+			assert.Equal(t, "application/gzip", contentType)
+			uploaded = true
+			return nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, builderSvc, &mockDocker{}, &mockRouter{}, s3)
+	d := &entities.Deployment{ID: "dep_git_success", GitURL: &gitURL}
+	sourceDir := t.TempDir()
+
+	err := svc.acquireSource(context.Background(), d, sourceDir)
+	require.NoError(t, err)
+	assert.True(t, cloned)
+	assert.True(t, uploaded)
+	require.NotNil(t, d.S3Key)
+	assert.Contains(t, *d.S3Key, "/source.tar.gz")
+}
+
+func TestAcquireSource_GitPath_UploadError(t *testing.T) {
+	t.Parallel()
+
+	gitURL := "https://github.com/foo/bar.git"
+	builderSvc := &mockBuilder{
+		cloneFunc: func(_ context.Context, url, destDir, deploymentID string) error {
+			return os.WriteFile(filepath.Join(destDir, "main.go"), []byte("package main"), 0o644)
+		},
+	}
+	s3 := &mockS3{
+		uploadFunc: func(context.Context, string, io.Reader, string) error {
+			return errors.New("upload failed")
+		},
+	}
+
+	svc := newTestDeploymentService(&mockRepo{}, &mockBroker{}, builderSvc, &mockDocker{}, &mockRouter{}, s3)
+	d := &entities.Deployment{ID: "dep_git", GitURL: &gitURL}
+	sourceDir := t.TempDir()
+
+	err := svc.acquireSource(context.Background(), d, sourceDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upload source archive")
+}
+
+func TestAcquireSource_NoSource(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestDeploymentService(&mockRepo{}, &mockBroker{}, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+	d := &entities.Deployment{ID: "dep_none"}
+	sourceDir := t.TempDir()
+
+	err := svc.acquireSource(context.Background(), d, sourceDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git_url is required")
+}
+
+func TestUploadFileToS3_FileOpenError(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestDeploymentService(&mockRepo{}, &mockBroker{}, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+	err := svc.uploadFileToS3(context.Background(), "/nonexistent/file.txt", "key", "text/plain")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open file")
+}
+
+func TestFailPipeline_UpdateError(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{
+		updateFunc: func(context.Context, *entities.Deployment) error {
+			return errors.New("update failed")
+		},
+	}
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+	d := &entities.Deployment{ID: "dep_fail", Status: entities.StatusPending}
+
+	svc.failPipeline(context.Background(), d, errors.New("something broke"))
+	assert.Equal(t, entities.StatusFailed, d.Status)
+	require.NotNil(t, d.ErrorMessage)
+	assert.Equal(t, "something broke", *d.ErrorMessage)
+}
+
+func TestPublishLogLines_EmptyAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{}
+	b := &mockBroker{}
+	svc := newTestDeploymentService(repo, b, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+
+	svc.publishLogLines(context.Background(), "dep_1", "build", "stdout", "line1\n\n   \nline2\n")
+
+	require.Len(t, repo.logs, 2)
+	assert.Equal(t, "line1", repo.logs[0].Content)
+	assert.Equal(t, "line2", repo.logs[1].Content)
+}
+
+func TestPublishLogLines_SkipCaddyLogs(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockRepo{}
+	b := &mockBroker{}
+	svc := newTestDeploymentService(repo, b, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+
+	svc.publishLogLines(context.Background(), "dep_1", "runtime", "stdout", `{"logger":"http.log.access"}`)
+	assert.Empty(t, repo.logs)
+
+	svc.publishLogLines(context.Background(), "dep_1", "build", "stdout", `{"logger":"http.log.access"}`)
+	require.Len(t, repo.logs, 1)
+}
+
+func TestExtractZip(t *testing.T) {
+	t.Parallel()
+
+	zipPath := filepath.Join(t.TempDir(), "test.zip")
+	zw := zip.NewWriter(nil)
+
+	f, err := os.Create(zipPath)
+	require.NoError(t, err)
+	zw = zip.NewWriter(f)
+
+	w1, err := zw.Create("myapp/readme.txt")
+	require.NoError(t, err)
+	w1.Write([]byte("hello"))
+
+	w2, err := zw.Create("myapp/src/main.go")
+	require.NoError(t, err)
+	w2.Write([]byte("package main"))
+
+	require.NoError(t, zw.Close())
+	require.NoError(t, f.Close())
+
+	destDir := t.TempDir()
+	err = extractZip(zipPath, destDir)
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(filepath.Join(destDir, "readme.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(content))
+
+	content2, err := os.ReadFile(filepath.Join(destDir, "src", "main.go"))
+	require.NoError(t, err)
+	assert.Equal(t, "package main", string(content2))
+}
+
+func TestExtractZip_PathTraversal(t *testing.T) {
+	t.Parallel()
+
+	zipPath := filepath.Join(t.TempDir(), "evil.zip")
+	f, err := os.Create(zipPath)
+	require.NoError(t, err)
+	zw := zip.NewWriter(f)
+
+	w1, err := zw.Create("a.txt")
+	require.NoError(t, err)
+	w1.Write([]byte("alpha"))
+
+	header := &zip.FileHeader{Name: "../../../etc/passwd"}
+	w2, err := zw.CreateHeader(header)
+	require.NoError(t, err)
+	w2.Write([]byte("root"))
+
+	require.NoError(t, zw.Close())
+	require.NoError(t, f.Close())
+
+	destDir := t.TempDir()
+	err = extractZip(zipPath, destDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes destination")
+}
+
+func TestExtractZip_BadZip(t *testing.T) {
+	t.Parallel()
+
+	zipPath := filepath.Join(t.TempDir(), "not-a-zip.txt")
+	require.NoError(t, os.WriteFile(zipPath, []byte("not a zip"), 0o644))
+
+	err := extractZip(zipPath, t.TempDir())
+	require.Error(t, err)
+}
+
+func TestDetectZipRootPrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		files    []string
+		expected string
+	}{
+		{"single file no dir", []string{"readme.txt"}, ""},
+		{"flat files", []string{"a.txt", "b.txt"}, ""},
+		{"common prefix", []string{"myapp/a.txt", "myapp/b.txt"}, "myapp/"},
+		{"nested common prefix", []string{"myapp/src/a.go", "myapp/src/b.go"}, "myapp/src/"},
+		{"mixed dirs and files", []string{"myapp/", "myapp/main.go"}, "myapp/"},
+		{"empty", []string{}, ""},
+		{"backslash paths", []string{"myapp\\a.txt", "myapp\\b.txt"}, "myapp/"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var files []*zip.File
+			for _, name := range tc.files {
+				files = append(files, &zip.File{
+					FileHeader: zip.FileHeader{Name: name},
+				})
+			}
+			assert.Equal(t, tc.expected, detectZipRootPrefix(files))
+		})
+	}
+}
+
+func TestNormalizeZipPath(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "path/to/file", normalizeZipPath("path\\to\\file"))
+	assert.Equal(t, "path/to/file", normalizeZipPath("path/to/file"))
+}
+
+func TestCreateTarGz(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "a.txt"), []byte("alpha"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(sourceDir, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "subdir", "b.txt"), []byte("beta"), 0o644))
+
+	outPath := filepath.Join(t.TempDir(), "out.tar.gz")
+	err := createTarGz(sourceDir, outPath)
+	require.NoError(t, err)
+
+	info, err := os.Stat(outPath)
+	require.NoError(t, err)
+	assert.Greater(t, info.Size(), int64(0))
+}
+
+func TestCreateTarGz_BadSourceDir(t *testing.T) {
+	t.Parallel()
+
+	outPath := filepath.Join(t.TempDir(), "out.tar.gz")
+	err := createTarGz("/nonexistent/directory", outPath)
+	require.Error(t, err)
+}
+
+func TestStreamRuntimeLogs(t *testing.T) {
+	t.Parallel()
+
+	logData := append(dockerLogFrame(1, "stdout line\n"), dockerLogFrame(2, "stderr line\n")...)
+	repo := &mockRepo{}
+	repo.getByIDFunc = func(context.Context, string) (*entities.Deployment, error) {
+		return &entities.Deployment{ID: "dep_1", Status: entities.StatusRunning}, nil
+	}
+	repo.updateFunc = func(context.Context, *entities.Deployment) error { return nil }
+
+	var inspectCalled bool
+	dockerSvc := &mockDocker{
+		streamContainerLogsFn: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(logData)), nil
+		},
+		inspectContainerFunc: func(context.Context, string) (*container.State, error) {
+			inspectCalled = true
+			return &container.State{Running: false, ExitCode: 1}, nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, &mockRouter{}, &mockS3{})
+
+	svc.streamRuntimeLogs(context.Background(), "dep_1", "container123")
+
+	assert.True(t, inspectCalled)
+	require.NotEmpty(t, repo.logs)
+	require.NotEmpty(t, repo.updated)
+	assert.Equal(t, entities.StatusFailed, repo.updated[len(repo.updated)-1].Status)
+}
+
+func TestStreamRuntimeLogs_StreamError(t *testing.T) {
+	t.Parallel()
+
+	dockerSvc := &mockDocker{
+		streamContainerLogsFn: func(context.Context, string) (io.ReadCloser, error) {
+			return nil, errors.New("stream failed")
+		},
+	}
+
+	svc := newTestDeploymentService(&mockRepo{}, &mockBroker{}, &mockBuilder{}, dockerSvc, &mockRouter{}, &mockS3{})
+
+	svc.streamRuntimeLogs(context.Background(), "dep_1", "container123")
+}
+
+func TestStreamRuntimeLogs_ContainerStillRunning(t *testing.T) {
+	t.Parallel()
+
+	logData := dockerLogFrame(1, "stdout line\n")
+	repo := &mockRepo{}
+
+	dockerSvc := &mockDocker{
+		streamContainerLogsFn: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(logData)), nil
+		},
+		inspectContainerFunc: func(context.Context, string) (*container.State, error) {
+			return &container.State{Running: true, ExitCode: 0}, nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, &mockBroker{}, &mockBuilder{}, dockerSvc, &mockRouter{}, &mockS3{})
+	svc.streamRuntimeLogs(context.Background(), "dep_1", "container123")
+
+	assert.Empty(t, repo.updated)
+}
+
+func TestOpenLogStream_TickerUpdates(t *testing.T) {
+	t.Parallel()
+
+	deployment := &entities.Deployment{ID: "dep_1", Status: entities.StatusRunning}
+
+	callCount := 0
+	repo := &mockRepo{
+		getByIDFunc: func(context.Context, string) (*entities.Deployment, error) {
+			callCount++
+			if callCount == 1 {
+				return cloneDeployment(deployment), nil
+			}
+			failed := cloneDeployment(deployment)
+			failed.Status = entities.StatusFailed
+			failed.ErrorMessage = strPtr("boom")
+			return failed, nil
+		},
+		getLogsFunc: func(context.Context, string, int) ([]*entities.DeploymentLog, error) {
+			return []*entities.DeploymentLog{}, nil
+		},
+	}
+
+	liveSource := make(chan broker.LogLine)
+
+	b := &mockBroker{
+		subscribeFunc: func(string) (<-chan broker.LogLine, func(), error) {
+			return liveSource, func() {}, nil
+		},
+	}
+
+	svc := newTestDeploymentService(repo, b, &mockBuilder{}, &mockDocker{}, &mockRouter{}, &mockS3{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	session, err := svc.OpenLogStream(ctx, "dep_1", 0)
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	select {
+	case status := <-session.StatusUpdates:
+		assert.Equal(t, entities.StatusFailed, status.Status)
+		assert.Equal(t, "boom", status.ErrorMessage)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ticker status update")
+	}
+
+	session.Close()
+	close(liveSource)
+}
+
+func dockerLogFrame(stream byte, content string) []byte {
+	payload := []byte(content)
+	header := []byte{stream, 0, 0, 0, 0, 0, 0, byte(len(payload))}
+	return append(header, payload...)
 }

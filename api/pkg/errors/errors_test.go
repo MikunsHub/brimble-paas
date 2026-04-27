@@ -48,3 +48,9 @@ func TestNewInternalError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, err.Code)
 	assert.Equal(t, "internal", err.Message)
 }
+
+func TestAppError_Error(t *testing.T) {
+	t.Parallel()
+	err := NewBadRequestError("bad request")
+	assert.Equal(t, "bad request", err.Error())
+}
