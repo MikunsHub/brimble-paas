@@ -77,7 +77,7 @@ export function DeployForm() {
                 : 'text-zinc-500 hover:text-zinc-300',
             )}
           >
-            {t === 'git' ? 'Git URL' : 'CLI/Upload'}
+            {t === 'git' ? 'Git URL' : 'Zip Upload'}
           </button>
         ))}
       </div>

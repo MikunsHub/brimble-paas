@@ -13,6 +13,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/app && \
 
 FROM debian:bookworm-slim
 ARG TARGETARCH
+ARG RAILPACK_VERSION=v0.23.0
+ARG MISE_VERSION=v2026.4.24
+ARG BUILDX_VERSION=v0.33.0
 
 RUN set -eux; \
     apt-get update; \
@@ -29,17 +32,13 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH for mise: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     case "${TARGETARCH}" in \
-      amd64) buildx_arch="amd64" ;; \
-      arm64) buildx_arch="arm64" ;; \
+      amd64|arm64) buildx_arch="${TARGETARCH}" ;; \
       *) echo "unsupported TARGETARCH for buildx: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    railpack_version="$(curl --fail --silent --show-error https://api.github.com/repos/railwayapp/railpack/releases/latest | grep -o '"tag_name": "v[^"]*"' | cut -d'"' -f4)"; \
-    mise_version="$(curl --fail --silent --show-error https://api.github.com/repos/jdx/mise/releases/latest | grep -o '"tag_name": "v[^"]*"' | cut -d'"' -f4)"; \
-    buildx_version="$(curl --fail --silent --show-error https://api.github.com/repos/docker/buildx/releases/latest | grep -o '"tag_name": "v[^"]*"' | cut -d'"' -f4)"; \
-    curl -fsSL "https://github.com/railwayapp/railpack/releases/download/${railpack_version}/railpack-${railpack_version}-${railpack_arch}-unknown-linux-musl.tar.gz" -o /tmp/railpack.tar.gz; \
-    curl -fsSL "https://github.com/jdx/mise/releases/download/${mise_version}/mise-${mise_version}-linux-${mise_arch}.tar.gz" -o /tmp/mise.tar.gz; \
+    curl -fsSL "https://github.com/railwayapp/railpack/releases/download/${RAILPACK_VERSION}/railpack-${RAILPACK_VERSION}-${railpack_arch}-unknown-linux-musl.tar.gz" -o /tmp/railpack.tar.gz; \
+    curl -fsSL "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${mise_arch}.tar.gz" -o /tmp/mise.tar.gz; \
     mkdir -p /usr/libexec/docker/cli-plugins; \
-    curl -fsSL "https://github.com/docker/buildx/releases/download/${buildx_version}/buildx-${buildx_version}.linux-${buildx_arch}" -o /usr/libexec/docker/cli-plugins/docker-buildx; \
+    curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${buildx_arch}" -o /usr/libexec/docker/cli-plugins/docker-buildx; \
     tar -xzf /tmp/railpack.tar.gz -C /usr/local/bin railpack; \
     mkdir -p /opt/mise /var/lib/mise /var/cache/mise /var/tmp/mise; \
     tar -xzf /tmp/mise.tar.gz -C /opt/mise; \
