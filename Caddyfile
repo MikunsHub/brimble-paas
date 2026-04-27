@@ -1,5 +1,4 @@
 {
-	# Admin API on :2019 (internal only — not exposed to the internet)
 	admin :2019
 }
 
@@ -9,6 +8,13 @@
 		reverse_proxy api:8080
 	}
 
-	# Deployment routes are registered dynamically via the Caddy Admin API.
-	# Each subdomain gets its own route prepended above this block.
+	handle_path /s3-upload/* {
+		reverse_proxy localstack:4566
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
 }

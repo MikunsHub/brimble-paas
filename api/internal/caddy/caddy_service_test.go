@@ -3,6 +3,7 @@ package caddy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -71,13 +72,17 @@ func TestCaddyService_AddRoute(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
 		var routePosted bool
+		var route map[string]any
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/config/apps/http/servers":
 				_ = json.NewEncoder(w).Encode(map[string]any{"srv0": map[string]any{}})
-			case "/config/apps/http/servers/srv0/routes":
+			case "/config/apps/http/servers/srv0/routes/0":
 				routePosted = true
-				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, http.MethodPut, r.Method)
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(body, &route))
 				w.WriteHeader(http.StatusOK)
 			default:
 				http.NotFound(w, r)
@@ -88,6 +93,9 @@ func TestCaddyService_AddRoute(t *testing.T) {
 		svc := NewCaddyService(srv.URL, "example.com")
 		require.NoError(t, svc.AddRoute(context.Background(), "demo", "10.0.0.1:8000"))
 		assert.True(t, routePosted)
+		assert.Equal(t, "deployment-demo", route["@id"])
+		match := route["match"].([]any)[0].(map[string]any)
+		assert.Equal(t, []any{"demo.example.com"}, match["host"])
 	})
 
 	t.Run("non-200", func(t *testing.T) {
@@ -96,7 +104,7 @@ func TestCaddyService_AddRoute(t *testing.T) {
 			switch r.URL.Path {
 			case "/config/apps/http/servers":
 				_ = json.NewEncoder(w).Encode(map[string]any{"srv0": map[string]any{}})
-			case "/config/apps/http/servers/srv0/routes":
+			case "/config/apps/http/servers/srv0/routes/0":
 				w.WriteHeader(http.StatusBadGateway)
 			}
 		}))

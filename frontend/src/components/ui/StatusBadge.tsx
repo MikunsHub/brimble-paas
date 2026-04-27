@@ -34,6 +34,14 @@ const CONFIG: Record<DeploymentStatus, StatusConfig> = {
     bgColor: 'bg-yellow-950/40',
     pulse: true,
   },
+  restarting: {
+    label: 'Restarting',
+    shortLabel: 'RESTART',
+    textColor: 'text-amber-300',
+    dotColor: 'bg-amber-300',
+    bgColor: 'bg-amber-950/40',
+    pulse: true,
+  },
   running: {
     label: 'Live',
     shortLabel: 'READY',
@@ -47,6 +55,14 @@ const CONFIG: Record<DeploymentStatus, StatusConfig> = {
     textColor: 'text-red-400',
     dotColor: 'bg-red-500',
     bgColor: 'bg-red-950/40',
+  },
+  stopping: {
+    label: 'Stopping',
+    shortLabel: 'STOPPING',
+    textColor: 'text-orange-300',
+    dotColor: 'bg-orange-300',
+    bgColor: 'bg-orange-950/40',
+    pulse: true,
   },
   stopped: {
     label: 'Stopped',

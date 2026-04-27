@@ -918,7 +918,7 @@ func TestRunPipeline_Success(t *testing.T) {
 	last := repo.updated[len(repo.updated)-1]
 	assert.Equal(t, entities.StatusRunning, last.Status)
 	require.NotNil(t, last.LiveURL)
-	assert.Contains(t, *last.LiveURL, "demo.")
+	assert.Equal(t, "http://demo.example.com", *last.LiveURL)
 	require.NotNil(t, last.ContainerID)
 	assert.Equal(t, "container123", *last.ContainerID)
 	require.NotNil(t, last.ImageTag)
@@ -1029,7 +1029,7 @@ func TestRunFromImage_Success(t *testing.T) {
 	last := repo.updated[len(repo.updated)-1]
 	assert.Equal(t, entities.StatusRunning, last.Status)
 	require.NotNil(t, last.LiveURL)
-	assert.Contains(t, *last.LiveURL, "demo.")
+	assert.Equal(t, "http://demo.example.com", *last.LiveURL)
 }
 
 func TestAcquireSource_S3Path(t *testing.T) {

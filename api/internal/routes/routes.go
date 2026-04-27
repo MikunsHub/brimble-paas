@@ -12,14 +12,14 @@ type Deps struct {
 }
 
 func Register(r *gin.Engine, deps Deps) {
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
-
 	deployHandler := deployment.NewDeploymentHandler(deps.Base, deps.DeploymentSvc)
 
 	api := r.Group("/api")
 	{
+		api.GET("/health", func(c *gin.Context) {
+			c.JSON(200, gin.H{"status": "ok"})
+		})
+
 		deploys := api.Group("/deployments")
 		{
 			deploys.POST("/upload-url", deployHandler.CreateUploadURL)

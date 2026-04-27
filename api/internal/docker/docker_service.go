@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
-const appPort = "8000"
+const appPort = "5000"
 
 type DockerService struct {
 	client  *client.Client
@@ -100,17 +101,27 @@ func (s *DockerService) WaitForHealthy(ctx context.Context, containerID string, 
 
 	stableThreshold := 1 * time.Second
 	var stableSince time.Time
+	var lastAppAddr string
 
 	for {
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
+				if lastAppAddr != "" {
+					return fmt.Errorf("app did not accept TCP connections on %s after %v", lastAppAddr, timeout)
+				}
 				return fmt.Errorf("health check timed out after %v", timeout)
 			}
 			return ctx.Err()
 		case <-ticker.C:
 			info, err := s.client.ContainerInspect(ctx, containerID)
 			if err != nil {
+				if ctx.Err() == context.DeadlineExceeded {
+					if lastAppAddr != "" {
+						return fmt.Errorf("app did not accept TCP connections on %s after %v", lastAppAddr, timeout)
+					}
+					return fmt.Errorf("health check timed out after %v", timeout)
+				}
 				return fmt.Errorf("failed to inspect container: %w", err)
 			}
 
@@ -123,6 +134,15 @@ func (s *DockerService) WaitForHealthy(ctx context.Context, containerID string, 
 			}
 
 			if info.State.Running && info.RestartCount == 0 {
+				appAddr, err := s.containerAppAddress(info.NetworkSettings)
+				if err != nil {
+					return err
+				}
+				lastAppAddr = appAddr
+				if !tcpReachable(appAddr, 300*time.Millisecond) {
+					stableSince = time.Time{}
+					continue
+				}
 				if stableSince.IsZero() {
 					stableSince = time.Now()
 				} else if time.Since(stableSince) >= stableThreshold {
@@ -133,6 +153,26 @@ func (s *DockerService) WaitForHealthy(ctx context.Context, containerID string, 
 			}
 		}
 	}
+}
+
+func (s *DockerService) containerAppAddress(settings *container.NetworkSettings) (string, error) {
+	if settings == nil {
+		return "", fmt.Errorf("container network settings unavailable")
+	}
+	netSettings, ok := settings.Networks[s.network]
+	if !ok || netSettings.IPAddress == "" {
+		return "", fmt.Errorf("container not connected to network %q", s.network)
+	}
+	return net.JoinHostPort(netSettings.IPAddress, appPort), nil
+}
+
+func tcpReachable(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func (s *DockerService) GetContainerLogs(ctx context.Context, containerID string) (string, error) {

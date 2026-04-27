@@ -2,8 +2,10 @@ export type DeploymentStatus =
   | 'pending'
   | 'building'
   | 'deploying'
+  | 'restarting'
   | 'running'
   | 'failed'
+  | 'stopping'
   | 'stopped'
 
 export interface Deployment {

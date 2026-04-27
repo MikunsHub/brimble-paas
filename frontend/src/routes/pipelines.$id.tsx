@@ -9,10 +9,17 @@ import { StatusBadge } from '../components/ui/StatusBadge'
 import { LogLine } from '../components/deployment/LogLine'
 import { ExternalLink, Square, RotateCcw, Loader2 } from 'lucide-react'
 import { useEffect, useRef } from 'react'
-import type { DeploymentStatus } from '../types'
+import type { Deployment, DeploymentStatus } from '../types'
 
 const STOPPABLE: DeploymentStatus[] = ['pending', 'building', 'deploying', 'running']
 const RESTARTABLE: DeploymentStatus[] = ['stopped', 'failed']
+
+function updateDeploymentStatus(
+  deployment: Deployment,
+  status: DeploymentStatus,
+): Deployment {
+  return { ...deployment, status }
+}
 
 export const deploymentRoute = createRoute({
   getParentRoute: () => pipelinesRoute,
@@ -55,7 +62,33 @@ function DeploymentView() {
 
   const stopMutation = useMutation({
     mutationFn: () => deploymentApi.delete(id),
-    onSuccess: () => {
+    onMutate: async () => {
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ['deployments'] }),
+        qc.cancelQueries({ queryKey: ['deployments', id] }),
+      ])
+
+      const previousDeployments = qc.getQueryData<Deployment[]>(['deployments'])
+      const previousDeployment = qc.getQueryData<Deployment>(['deployments', id])
+
+      qc.setQueryData<Deployment[]>(['deployments'], (current = []) =>
+        current.map((item) => (item.id === id ? updateDeploymentStatus(item, 'stopping') : item)),
+      )
+      qc.setQueryData<Deployment>(['deployments', id], (current) =>
+        current ? updateDeploymentStatus(current, 'stopping') : current,
+      )
+
+      return { previousDeployments, previousDeployment }
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousDeployments) {
+        qc.setQueryData(['deployments'], context.previousDeployments)
+      }
+      if (context?.previousDeployment) {
+        qc.setQueryData(['deployments', id], context.previousDeployment)
+      }
+    },
+    onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['deployments'] })
       void qc.invalidateQueries({ queryKey: ['deployments', id] })
       void qc.invalidateQueries({ queryKey: ['logs', id] })
@@ -64,7 +97,33 @@ function DeploymentView() {
 
   const restartMutation = useMutation({
     mutationFn: () => deploymentApi.restart(id),
-    onSuccess: () => {
+    onMutate: async () => {
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ['deployments'] }),
+        qc.cancelQueries({ queryKey: ['deployments', id] }),
+      ])
+
+      const previousDeployments = qc.getQueryData<Deployment[]>(['deployments'])
+      const previousDeployment = qc.getQueryData<Deployment>(['deployments', id])
+
+      qc.setQueryData<Deployment[]>(['deployments'], (current = []) =>
+        current.map((item) => (item.id === id ? updateDeploymentStatus(item, 'restarting') : item)),
+      )
+      qc.setQueryData<Deployment>(['deployments', id], (current) =>
+        current ? updateDeploymentStatus(current, 'restarting') : current,
+      )
+
+      return { previousDeployments, previousDeployment }
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousDeployments) {
+        qc.setQueryData(['deployments'], context.previousDeployments)
+      }
+      if (context?.previousDeployment) {
+        qc.setQueryData(['deployments', id], context.previousDeployment)
+      }
+    },
+    onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['deployments'] })
       void qc.invalidateQueries({ queryKey: ['deployments', id] })
       void qc.invalidateQueries({ queryKey: ['logs', id] })
@@ -73,7 +132,7 @@ function DeploymentView() {
 
   const { data: polledLogs = [] } = useLogs(id)
 
-  const isActive = ['pending', 'building', 'deploying', 'running'].includes(deployment.status)
+  const isActive = ['pending', 'building', 'deploying', 'restarting', 'running', 'stopping'].includes(deployment.status)
   const { streamLogs } = useLogStream(id, isActive)
 
   const polledIds = new Set(polledLogs.map((l) => l.id))

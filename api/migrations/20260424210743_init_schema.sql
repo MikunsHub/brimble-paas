@@ -1,6 +1,8 @@
 -- +goose Up
 -- +goose StatementBegin
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE deployments (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     git_url         TEXT,

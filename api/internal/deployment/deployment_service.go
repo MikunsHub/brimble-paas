@@ -392,32 +392,46 @@ func (s *deploymentService) runPipeline(d *entities.Deployment) {
 		logger.Error(err, "pipeline: failed to update status to deploying", "id", d.ID)
 	}
 
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Starting container...")
 	containerID, containerAddr, err := s.dockerSvc.RunContainer(ctx, imageTag, d.Subdomain)
 	if err != nil {
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to start container: "+err.Error())
 		s.failPipeline(ctx, d, fmt.Errorf("run container: %w", err))
 		return
 	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Container started "+containerID[:12])
 
 	d.ContainerID = &containerID
 	d.ContainerAddr = &containerAddr
 
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Waiting for health check on port 8000...")
 	if err := s.dockerSvc.WaitForHealthy(ctx, containerID, 10*time.Second); err != nil {
 		logs, logErr := s.dockerSvc.GetContainerLogs(ctx, containerID)
 		if logErr == nil && logs != "" {
 			s.publishLogLines(ctx, d.ID, "runtime", "stderr", logs)
 		}
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Health check failed: "+err.Error())
+		s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Stopping failed container "+containerID[:12]+"...")
+		if stopErr := s.dockerSvc.StopContainer(ctx, containerID); stopErr != nil {
+			s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to stop container: "+stopErr.Error())
+		}
 		s.failPipeline(ctx, d, fmt.Errorf("health check failed: %w", err))
 		return
 	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Health check passed")
 
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Registering route for "+d.Subdomain+"...")
 	if err := s.caddySvc.AddRoute(ctx, d.Subdomain, containerAddr); err != nil {
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to register route: "+err.Error())
+		s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Stopping failed container "+containerID[:12]+"...")
+		if stopErr := s.dockerSvc.StopContainer(ctx, containerID); stopErr != nil {
+			s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to stop container: "+stopErr.Error())
+		}
 		s.failPipeline(ctx, d, fmt.Errorf("caddy route: %w", err))
 		return
 	}
 
-	liveURL := "http://" + d.Subdomain + "." + s.cfg.Domain
+	liveURL := deploymentLiveURL(s.cfg.Domain, d.Subdomain)
 	d.LiveURL = &liveURL
 	d.Status = entities.StatusRunning
 
@@ -462,7 +476,10 @@ func (s *deploymentService) runFromImage(d *entities.Deployment) {
 			s.publishLogLines(ctx, d.ID, "runtime", "stderr", logs)
 		}
 		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Health check failed: "+err.Error())
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Stopping failed container "+containerID[:12]+"...")
+		if stopErr := s.dockerSvc.StopContainer(ctx, containerID); stopErr != nil {
+			s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to stop container: "+stopErr.Error())
+		}
 		s.failPipeline(ctx, d, fmt.Errorf("health check failed: %w", err))
 		return
 	}
@@ -471,12 +488,15 @@ func (s *deploymentService) runFromImage(d *entities.Deployment) {
 	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Registering route for "+d.Subdomain+"...")
 	if err := s.caddySvc.AddRoute(ctx, d.Subdomain, containerAddr); err != nil {
 		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to register route: "+err.Error())
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Stopping failed container "+containerID[:12]+"...")
+		if stopErr := s.dockerSvc.StopContainer(ctx, containerID); stopErr != nil {
+			s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to stop container: "+stopErr.Error())
+		}
 		s.failPipeline(ctx, d, fmt.Errorf("caddy route: %w", err))
 		return
 	}
 
-	liveURL := "http://" + d.Subdomain + "." + s.cfg.Domain
+	liveURL := deploymentLiveURL(s.cfg.Domain, d.Subdomain)
 	d.LiveURL = &liveURL
 	d.Status = entities.StatusRunning
 
@@ -526,6 +546,10 @@ func (s *deploymentService) acquireSource(ctx context.Context, d *entities.Deplo
 		return fmt.Errorf("persist s3 key: %w", err)
 	}
 	return nil
+}
+
+func deploymentLiveURL(domain, subdomain string) string {
+	return "http://" + subdomain + "." + domain
 }
 
 func (s *deploymentService) uploadFileToS3(ctx context.Context, path, key, contentType string) error {

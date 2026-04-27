@@ -49,8 +49,10 @@ func (s *CaddyService) AddRoute(ctx context.Context, subdomain, upstreamAddr str
 		return fmt.Errorf("failed to marshal caddy route: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/config/apps/http/servers/%s/routes", s.adminURL, serverName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// Insert deployment routes ahead of the platform catch-all so
+	// subdomain traffic reaches the deployed app instead of /srv.
+	url := fmt.Sprintf("%s/config/apps/http/servers/%s/routes/0", s.adminURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

@@ -41,6 +41,7 @@ skills-lock.json
 test_static
 postman
 test_vue
+test_python
 
 # Node.js / Frontend
 node_modules/

@@ -21,7 +21,7 @@ type Config struct {
 	S3Bucket       string `env:"S3_BUCKET"             envDefault:"brimble-deployments"`
 	DockerHost     string `env:"DOCKER_HOST"           envDefault:"unix:///var/run/docker.sock"`
 	DockerNetwork  string `env:"DOCKER_NETWORK"        envDefault:"brimble-paas_brimble-network"`
-	Domain         string `env:"DOMAIN"                envDefault:"brimble.test"`
+	Domain         string `env:"DOMAIN"                envDefault:"localhost"`
 	CaddyAdminURL  string `env:"CADDY_ADMIN_URL"       envDefault:"http://localhost:2019"`
 	BuildMode      string `env:"BUILD_MODE"            envDefault:"dev"` // dev | prod
 	AllowedOrigins string `env:"ALLOWED_ORIGINS"       envDefault:"http://localhost:5173"`
