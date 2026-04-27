@@ -92,3 +92,9 @@ The main design split is simple:
 2: https://www.loom.com/share/c7794edfbf4a44ebb63e313cb02ce645
 
 Both videos total 10 mins and had to be split into 2 because of Loom
+
+## Sample Container app to use
+To test you can use `test_static.zip` in the repo
+
+## Rough time spent
+I spent about 1 and a half days in total, if I had more time, I would have loved to implement the zero downtime deployment, terminal to check running application logs, support for adding environment variables, preview deployments also, support for redis or nats for the sse (for example if we have multi-node deployment for the sse deployments).
