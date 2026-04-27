@@ -33,7 +33,7 @@ type Service interface {
 	Teardown(ctx context.Context, id string) error
 	Restart(ctx context.Context, id string) (*entities.Deployment, error)
 	GetLogs(ctx context.Context, id string, offset int) ([]*entities.DeploymentLog, error)
-	SubscribeLogs(ctx context.Context, id string) (<-chan broker.LogLine, func(), error)
+	OpenLogStream(ctx context.Context, id string, offset int) (*LogStreamSession, error)
 }
 
 type deploymentService struct {
@@ -204,10 +204,8 @@ func (s *deploymentService) Restart(ctx context.Context, id string) (*entities.D
 		return nil, apperrors.NewBadRequestError("no source available to restart from")
 	}
 
-	// Emit a restart marker — frontend uses this as a visual separator in the log terminal
 	s.publishLogLines(ctx, id, "restart", "stdout", "--- Restarted ---")
 
-	// Reset the record in-place; keeps the same ID and subdomain (no unique-key conflict)
 	d.Status = entities.StatusPending
 	d.ContainerID = nil
 	d.ContainerAddr = nil
@@ -217,7 +215,6 @@ func (s *deploymentService) Restart(ctx context.Context, id string) (*entities.D
 		return nil, apperrors.NewInternalError("failed to reset deployment")
 	}
 
-	// Reuse the already-built image if available; fall back to a full rebuild otherwise
 	if d.ImageTag != nil {
 		go s.runFromImage(d)
 	} else {
@@ -228,66 +225,6 @@ func (s *deploymentService) Restart(ctx context.Context, id string) (*entities.D
 	return d, nil
 }
 
-// runFromImage re-runs a deployment using its existing Docker image — skips clone and build.
-func (s *deploymentService) runFromImage(d *entities.Deployment) {
-	ctx := context.Background()
-	imageTag := *d.ImageTag
-	logger.Info("pipeline (restart from image) started", "id", d.ID, "imageTag", imageTag)
-
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Reusing image "+imageTag)
-
-	d.Status = entities.StatusDeploying
-	if err := s.repo.Update(ctx, d); err != nil {
-		logger.Error(err, "pipeline: failed to update status to deploying", "id", d.ID)
-	}
-
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Starting container...")
-	containerID, containerAddr, err := s.dockerSvc.RunContainer(ctx, imageTag, d.Subdomain)
-	if err != nil {
-		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to start container: "+err.Error())
-		s.failPipeline(ctx, d, fmt.Errorf("run container: %w", err))
-		return
-	}
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Container started "+containerID[:12])
-
-	d.ContainerID = &containerID
-	d.ContainerAddr = &containerAddr
-
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Waiting for health check...")
-	if err := s.dockerSvc.WaitForHealthy(ctx, containerID, 10*time.Second); err != nil {
-		logs, logErr := s.dockerSvc.GetContainerLogs(ctx, containerID)
-		if logErr == nil && logs != "" {
-			s.publishLogLines(ctx, d.ID, "runtime", "stderr", logs)
-		}
-		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Health check failed: "+err.Error())
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
-		s.failPipeline(ctx, d, fmt.Errorf("health check failed: %w", err))
-		return
-	}
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Health check passed")
-
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Registering route for "+d.Subdomain+"...")
-	if err := s.caddySvc.AddRoute(ctx, d.Subdomain, containerAddr); err != nil {
-		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to register route: "+err.Error())
-		_ = s.dockerSvc.StopContainer(ctx, containerID)
-		s.failPipeline(ctx, d, fmt.Errorf("caddy route: %w", err))
-		return
-	}
-
-	liveURL := "http://" + d.Subdomain + "." + s.cfg.Domain
-	d.LiveURL = &liveURL
-	d.Status = entities.StatusRunning
-
-	if err := s.repo.Update(ctx, d); err != nil {
-		logger.Error(err, "pipeline: failed to update status to running", "id", d.ID)
-		return
-	}
-
-	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Deployment live at "+liveURL)
-	logger.Info("deployment restarted successfully", "id", d.ID, "url", liveURL, "container", containerID[:12])
-	go s.streamRuntimeLogs(ctx, d.ID, containerID)
-}
-
 func (s *deploymentService) GetLogs(ctx context.Context, id string, offset int) ([]*entities.DeploymentLog, error) {
 	logs, err := s.repo.GetLogs(ctx, id, offset)
 	if err != nil {
@@ -296,24 +233,129 @@ func (s *deploymentService) GetLogs(ctx context.Context, id string, offset int) 
 	return logs, nil
 }
 
-func (s *deploymentService) SubscribeLogs(ctx context.Context, id string) (<-chan broker.LogLine, func(), error) {
+func (s *deploymentService) OpenLogStream(ctx context.Context, id string, offset int) (*LogStreamSession, error) {
+	if offset < 0 {
+		return nil, apperrors.NewBadRequestError("offset must be greater than or equal to 0")
+	}
+
 	d, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, nil, apperrors.NewInternalError("failed to fetch deployment")
+		return nil, apperrors.NewInternalError("failed to fetch deployment")
 	}
 	if d == nil {
-		return nil, nil, apperrors.NewNotFoundError("deployment not found")
+		return nil, apperrors.NewNotFoundError("deployment not found")
 	}
 
-	ch, unsubscribe, err := s.broker.Subscribe(id)
+	history, err := s.repo.GetLogs(ctx, id, offset)
 	if err != nil {
-		return nil, nil, apperrors.NewInternalError("failed to subscribe to deployment logs")
+		return nil, apperrors.NewInternalError("failed to fetch logs")
 	}
-	return ch, unsubscribe, nil
+
+	liveSource, unsubscribe, err := s.broker.Subscribe(id)
+	if err != nil {
+		return nil, apperrors.NewInternalError("failed to subscribe to deployment logs")
+	}
+
+	catchup, err := s.repo.GetLogs(ctx, id, offset+len(history))
+	if err != nil {
+		unsubscribe()
+		return nil, apperrors.NewInternalError("failed to fetch logs")
+	}
+
+	historyEvents := make([]StreamLogEvent, 0, len(history)+len(catchup))
+	nextIndex := offset
+	for _, log := range history {
+		historyEvents = append(historyEvents, deploymentLogToStreamEvent(log, nextIndex))
+		nextIndex++
+	}
+	for _, log := range catchup {
+		historyEvents = append(historyEvents, deploymentLogToStreamEvent(log, nextIndex))
+		nextIndex++
+	}
+
+	liveLogs := make(chan StreamLogEvent, 256)
+	statusUpdates := make(chan StreamStatusEvent, 16)
+	stop := make(chan struct{})
+
+	go func() {
+		defer unsubscribe()
+		defer close(liveLogs)
+		defer close(statusUpdates)
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		pendingDuplicates := len(catchup)
+		lastStatus := d.Status
+		lastLiveURL := stringPtrValue(d.LiveURL)
+		lastError := stringPtrValue(d.ErrorMessage)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case line, ok := <-liveSource:
+				if !ok {
+					return
+				}
+				if pendingDuplicates > 0 {
+					pendingDuplicates--
+					continue
+				}
+
+				event := brokerLogToStreamEvent(line, nextIndex)
+				nextIndex++
+
+				select {
+				case liveLogs <- event:
+				case <-ctx.Done():
+					return
+				case <-stop:
+					return
+				}
+			case <-ticker.C:
+				current, err := s.repo.GetByID(ctx, id)
+				if err != nil || current == nil {
+					return
+				}
+
+				currentLiveURL := stringPtrValue(current.LiveURL)
+				currentError := stringPtrValue(current.ErrorMessage)
+				if current.Status != lastStatus || currentLiveURL != lastLiveURL || currentError != lastError {
+					status := deploymentToStatusEvent(current)
+					lastStatus = current.Status
+					lastLiveURL = currentLiveURL
+					lastError = currentError
+
+					select {
+					case statusUpdates <- status:
+					case <-ctx.Done():
+						return
+					case <-stop:
+						return
+					}
+				}
+
+				if isTerminalStatus(current.Status) {
+					return
+				}
+			}
+		}
+	}()
+
+	return &LogStreamSession{
+		InitialStatus: deploymentToStatusEvent(d),
+		History:       historyEvents,
+		LiveLogs:      liveLogs,
+		StatusUpdates: statusUpdates,
+		Close: func() {
+			close(stop)
+		},
+	}, nil
 }
 
-// runPipeline is launched as a goroutine after a deployment record is created.
-// Phases: clone → build → run container → health check → register Caddy route.
 func (s *deploymentService) runPipeline(d *entities.Deployment) {
 	ctx := context.Background()
 	logger.Info("pipeline started", "id", d.ID, "subdomain", d.Subdomain)
@@ -391,11 +433,65 @@ func (s *deploymentService) runPipeline(d *entities.Deployment) {
 
 	logger.Info("deployment running", "id", d.ID, "url", liveURL, "container", containerID[:12])
 
-	// ── Phase 4: stream runtime logs ──────────────────────────────────────────
-	// Start a background goroutine that tails the container's stdout/stderr
-	// and publishes them to the log broker + database. If the container
-	// crashes later, update its status to failed.
+	go s.streamRuntimeLogs(ctx, d.ID, containerID)
+}
 
+func (s *deploymentService) runFromImage(d *entities.Deployment) {
+	ctx := context.Background()
+	imageTag := *d.ImageTag
+	logger.Info("pipeline (restart from image) started", "id", d.ID, "imageTag", imageTag)
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Reusing image "+imageTag)
+
+	d.Status = entities.StatusDeploying
+	if err := s.repo.Update(ctx, d); err != nil {
+		logger.Error(err, "pipeline: failed to update status to deploying", "id", d.ID)
+	}
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Starting container...")
+	containerID, containerAddr, err := s.dockerSvc.RunContainer(ctx, imageTag, d.Subdomain)
+	if err != nil {
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to start container: "+err.Error())
+		s.failPipeline(ctx, d, fmt.Errorf("run container: %w", err))
+		return
+	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Container started "+containerID[:12])
+
+	d.ContainerID = &containerID
+	d.ContainerAddr = &containerAddr
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Waiting for health check...")
+	if err := s.dockerSvc.WaitForHealthy(ctx, containerID, 10*time.Second); err != nil {
+		logs, logErr := s.dockerSvc.GetContainerLogs(ctx, containerID)
+		if logErr == nil && logs != "" {
+			s.publishLogLines(ctx, d.ID, "runtime", "stderr", logs)
+		}
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Health check failed: "+err.Error())
+		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.failPipeline(ctx, d, fmt.Errorf("health check failed: %w", err))
+		return
+	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Health check passed")
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Registering route for "+d.Subdomain+"...")
+	if err := s.caddySvc.AddRoute(ctx, d.Subdomain, containerAddr); err != nil {
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to register route: "+err.Error())
+		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.failPipeline(ctx, d, fmt.Errorf("caddy route: %w", err))
+		return
+	}
+
+	liveURL := "http://" + d.Subdomain + "." + s.cfg.Domain
+	d.LiveURL = &liveURL
+	d.Status = entities.StatusRunning
+
+	if err := s.repo.Update(ctx, d); err != nil {
+		logger.Error(err, "pipeline: failed to update status to running", "id", d.ID)
+		return
+	}
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Deployment live at "+liveURL)
+	logger.Info("deployment restarted successfully", "id", d.ID, "url", liveURL, "container", containerID[:12])
 	go s.streamRuntimeLogs(ctx, d.ID, containerID)
 }
 
@@ -651,6 +747,9 @@ func (s *deploymentService) publishLogLines(ctx context.Context, deploymentID, p
 		if line == "" {
 			continue
 		}
+		if shouldSkipDeploymentLog(phase, line) {
+			continue
+		}
 		log := &entities.DeploymentLog{
 			DeploymentID: deploymentID,
 			Stream:       stream,
@@ -702,7 +801,6 @@ func (s *deploymentService) streamRuntimeLogs(ctx context.Context, deploymentID,
 		logger.Error(err, "runtime log stream ended", "deploymentID", deploymentID, "containerID", containerID)
 	}
 
-	// Stream ended — check if the container crashed after startup.
 	state, inspectErr := s.dockerSvc.InspectContainer(ctx, containerID)
 	if inspectErr == nil && state != nil && !state.Running && state.ExitCode != 0 {
 		logger.Info("container crashed after startup", "deploymentID", deploymentID, "exitCode", state.ExitCode)
@@ -718,22 +816,12 @@ func (s *deploymentService) streamRuntimeLogs(ctx context.Context, deploymentID,
 	}
 }
 
-type runtimeLogWriter struct {
-	deploymentID string
-	phase        string
-	stream       string
-	broker       broker.LogPublisher
-	repo         Repository
-	ctx          context.Context
-}
-
 func (w *runtimeLogWriter) Write(p []byte) (n int, err error) {
 	content := strings.TrimSpace(string(p))
 	if content == "" {
 		return len(p), nil
 	}
-	// Skip Caddy HTTP access log lines — they're infrastructure noise, not app output
-	if strings.Contains(content, `"http.log.access`) {
+	if shouldSkipDeploymentLog(w.phase, content) {
 		return len(p), nil
 	}
 	log := &entities.DeploymentLog{
@@ -755,4 +843,22 @@ func (w *runtimeLogWriter) Write(p []byte) (n int, err error) {
 		Content:      log.Content,
 	})
 	return len(p), nil
+}
+
+func shouldSkipDeploymentLog(phase, content string) bool {
+	if phase != "runtime" {
+		return false
+	}
+
+	if strings.Contains(content, `"http.log.access`) {
+		return true
+	}
+
+	if strings.Contains(content, `"logger":"http.log.error`) &&
+		strings.Contains(content, `"/favicon.ico"`) &&
+		(strings.Contains(content, `"status":404`) || strings.Contains(content, `HTTP 404`)) {
+		return true
+	}
+
+	return false
 }
