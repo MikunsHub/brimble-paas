@@ -26,6 +26,8 @@ type DeploymentResponse struct {
 	ID           string  `json:"id"`
 	Status       string  `json:"status"`
 	Subdomain    string  `json:"subdomain"`
+	GitURL       *string `json:"git_url,omitempty"`
+	S3Key        *string `json:"s3_key,omitempty"`
 	LiveURL      *string `json:"live_url,omitempty"`
 	ImageTag     *string `json:"image_tag,omitempty"`
 	ErrorMessage *string `json:"error_message,omitempty"`
@@ -46,6 +48,8 @@ func toDeploymentResponse(d *entities.Deployment) DeploymentResponse {
 		ID:           d.ID,
 		Status:       string(d.Status),
 		Subdomain:    d.Subdomain,
+		GitURL:       d.GitURL,
+		S3Key:        d.S3Key,
 		LiveURL:      d.LiveURL,
 		ImageTag:     d.ImageTag,
 		ErrorMessage: d.ErrorMessage,

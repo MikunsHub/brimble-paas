@@ -31,7 +31,9 @@ type Service interface {
 	Get(ctx context.Context, id string) (*entities.Deployment, error)
 	List(ctx context.Context) ([]*entities.Deployment, error)
 	Teardown(ctx context.Context, id string) error
+	Restart(ctx context.Context, id string) (*entities.Deployment, error)
 	GetLogs(ctx context.Context, id string, offset int) ([]*entities.DeploymentLog, error)
+	SubscribeLogs(ctx context.Context, id string) (<-chan broker.LogLine, func(), error)
 }
 
 type deploymentService struct {
@@ -158,14 +160,23 @@ func (s *deploymentService) Teardown(ctx context.Context, id string) error {
 		return apperrors.NewNotFoundError("deployment not found")
 	}
 
+	s.publishLogLines(ctx, id, "teardown", "stdout", "Stopping deployment...")
+
 	if d.ContainerID != nil {
+		short := (*d.ContainerID)[:12]
+		s.publishLogLines(ctx, id, "teardown", "stdout", "Sending SIGTERM to container "+short+"...")
 		if err := s.dockerSvc.StopContainer(ctx, *d.ContainerID); err != nil {
 			logger.Error(err, "teardown: failed to stop container", "id", id, "containerID", *d.ContainerID)
+			s.publishLogLines(ctx, id, "teardown", "stderr", "Warning: "+err.Error())
+		} else {
+			s.publishLogLines(ctx, id, "teardown", "stdout", "Container stopped successfully")
 		}
 	}
 
 	if err := s.caddySvc.RemoveRoute(ctx, d.Subdomain); err != nil {
 		logger.Error(err, "teardown: failed to remove caddy route", "id", id, "subdomain", d.Subdomain)
+	} else {
+		s.publishLogLines(ctx, id, "teardown", "stdout", "Route removed for "+d.Subdomain)
 	}
 
 	d.Status = entities.StatusStopped
@@ -173,8 +184,108 @@ func (s *deploymentService) Teardown(ctx context.Context, id string) error {
 		return apperrors.NewInternalError("failed to update deployment status")
 	}
 
+	s.publishLogLines(ctx, id, "teardown", "stdout", "Deployment stopped")
 	logger.Info("deployment stopped", "id", id)
 	return nil
+}
+
+func (s *deploymentService) Restart(ctx context.Context, id string) (*entities.Deployment, error) {
+	d, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, apperrors.NewInternalError("failed to fetch deployment")
+	}
+	if d == nil {
+		return nil, apperrors.NewNotFoundError("deployment not found")
+	}
+	if d.Status != entities.StatusStopped && d.Status != entities.StatusFailed {
+		return nil, apperrors.NewBadRequestError("deployment is not in a restartable state")
+	}
+	if d.ImageTag == nil && d.GitURL == nil && d.S3Key == nil {
+		return nil, apperrors.NewBadRequestError("no source available to restart from")
+	}
+
+	// Emit a restart marker — frontend uses this as a visual separator in the log terminal
+	s.publishLogLines(ctx, id, "restart", "stdout", "--- Restarted ---")
+
+	// Reset the record in-place; keeps the same ID and subdomain (no unique-key conflict)
+	d.Status = entities.StatusPending
+	d.ContainerID = nil
+	d.ContainerAddr = nil
+	d.ErrorMessage = nil
+
+	if err := s.repo.Update(ctx, d); err != nil {
+		return nil, apperrors.NewInternalError("failed to reset deployment")
+	}
+
+	// Reuse the already-built image if available; fall back to a full rebuild otherwise
+	if d.ImageTag != nil {
+		go s.runFromImage(d)
+	} else {
+		go s.runPipeline(d)
+	}
+
+	logger.Info("deployment restart initiated", "id", id)
+	return d, nil
+}
+
+// runFromImage re-runs a deployment using its existing Docker image — skips clone and build.
+func (s *deploymentService) runFromImage(d *entities.Deployment) {
+	ctx := context.Background()
+	imageTag := *d.ImageTag
+	logger.Info("pipeline (restart from image) started", "id", d.ID, "imageTag", imageTag)
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Reusing image "+imageTag)
+
+	d.Status = entities.StatusDeploying
+	if err := s.repo.Update(ctx, d); err != nil {
+		logger.Error(err, "pipeline: failed to update status to deploying", "id", d.ID)
+	}
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Starting container...")
+	containerID, containerAddr, err := s.dockerSvc.RunContainer(ctx, imageTag, d.Subdomain)
+	if err != nil {
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to start container: "+err.Error())
+		s.failPipeline(ctx, d, fmt.Errorf("run container: %w", err))
+		return
+	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Container started "+containerID[:12])
+
+	d.ContainerID = &containerID
+	d.ContainerAddr = &containerAddr
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Waiting for health check...")
+	if err := s.dockerSvc.WaitForHealthy(ctx, containerID, 10*time.Second); err != nil {
+		logs, logErr := s.dockerSvc.GetContainerLogs(ctx, containerID)
+		if logErr == nil && logs != "" {
+			s.publishLogLines(ctx, d.ID, "runtime", "stderr", logs)
+		}
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Health check failed: "+err.Error())
+		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.failPipeline(ctx, d, fmt.Errorf("health check failed: %w", err))
+		return
+	}
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Health check passed")
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Registering route for "+d.Subdomain+"...")
+	if err := s.caddySvc.AddRoute(ctx, d.Subdomain, containerAddr); err != nil {
+		s.publishLogLines(ctx, d.ID, "deploy", "stderr", "Failed to register route: "+err.Error())
+		_ = s.dockerSvc.StopContainer(ctx, containerID)
+		s.failPipeline(ctx, d, fmt.Errorf("caddy route: %w", err))
+		return
+	}
+
+	liveURL := "http://" + d.Subdomain + "." + s.cfg.Domain
+	d.LiveURL = &liveURL
+	d.Status = entities.StatusRunning
+
+	if err := s.repo.Update(ctx, d); err != nil {
+		logger.Error(err, "pipeline: failed to update status to running", "id", d.ID)
+		return
+	}
+
+	s.publishLogLines(ctx, d.ID, "deploy", "stdout", "Deployment live at "+liveURL)
+	logger.Info("deployment restarted successfully", "id", d.ID, "url", liveURL, "container", containerID[:12])
+	go s.streamRuntimeLogs(ctx, d.ID, containerID)
 }
 
 func (s *deploymentService) GetLogs(ctx context.Context, id string, offset int) ([]*entities.DeploymentLog, error) {
@@ -183,6 +294,22 @@ func (s *deploymentService) GetLogs(ctx context.Context, id string, offset int) 
 		return nil, apperrors.NewInternalError("failed to fetch logs")
 	}
 	return logs, nil
+}
+
+func (s *deploymentService) SubscribeLogs(ctx context.Context, id string) (<-chan broker.LogLine, func(), error) {
+	d, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, nil, apperrors.NewInternalError("failed to fetch deployment")
+	}
+	if d == nil {
+		return nil, nil, apperrors.NewNotFoundError("deployment not found")
+	}
+
+	ch, unsubscribe, err := s.broker.Subscribe(id)
+	if err != nil {
+		return nil, nil, apperrors.NewInternalError("failed to subscribe to deployment logs")
+	}
+	return ch, unsubscribe, nil
 }
 
 // runPipeline is launched as a goroutine after a deployment record is created.
@@ -524,19 +651,24 @@ func (s *deploymentService) publishLogLines(ctx context.Context, deploymentID, p
 		if line == "" {
 			continue
 		}
-		s.broker.Publish(deploymentID, broker.LogLine{
-			Phase:   phase,
-			Stream:  stream,
-			Content: line,
-		})
-		if err := s.repo.InsertLog(ctx, &entities.DeploymentLog{
+		log := &entities.DeploymentLog{
 			DeploymentID: deploymentID,
 			Stream:       stream,
 			Phase:        phase,
 			Content:      line,
-		}); err != nil {
-			logger.Error(err, "failed to persist container log line", "deploymentID", deploymentID)
 		}
+		if err := s.repo.InsertLog(ctx, log); err != nil {
+			logger.Error(err, "failed to persist container log line", "deploymentID", deploymentID)
+			continue
+		}
+		s.broker.Publish(deploymentID, broker.LogLine{
+			ID:           log.ID,
+			DeploymentID: log.DeploymentID,
+			Timestamp:    log.Timestamp.Format(time.RFC3339),
+			Phase:        log.Phase,
+			Stream:       log.Stream,
+			Content:      log.Content,
+		})
 	}
 }
 
@@ -600,18 +732,27 @@ func (w *runtimeLogWriter) Write(p []byte) (n int, err error) {
 	if content == "" {
 		return len(p), nil
 	}
-	w.broker.Publish(w.deploymentID, broker.LogLine{
-		Phase:   w.phase,
-		Stream:  w.stream,
-		Content: content,
-	})
-	if insertErr := w.repo.InsertLog(w.ctx, &entities.DeploymentLog{
+	// Skip Caddy HTTP access log lines — they're infrastructure noise, not app output
+	if strings.Contains(content, `"http.log.access`) {
+		return len(p), nil
+	}
+	log := &entities.DeploymentLog{
 		DeploymentID: w.deploymentID,
 		Stream:       w.stream,
 		Phase:        w.phase,
 		Content:      content,
-	}); insertErr != nil {
-		logger.Error(insertErr, "failed to persist runtime log", "deploymentID", w.deploymentID)
 	}
+	if insertErr := w.repo.InsertLog(w.ctx, log); insertErr != nil {
+		logger.Error(insertErr, "failed to persist runtime log", "deploymentID", w.deploymentID)
+		return len(p), nil
+	}
+	w.broker.Publish(w.deploymentID, broker.LogLine{
+		ID:           log.ID,
+		DeploymentID: log.DeploymentID,
+		Timestamp:    log.Timestamp.Format(time.RFC3339),
+		Phase:        log.Phase,
+		Stream:       log.Stream,
+		Content:      log.Content,
+	})
 	return len(p), nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/brimble/paas/config"
 	"github.com/brimble/paas/internal/builder"
@@ -82,9 +83,30 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 
+	allowedOrigins := map[string]bool{}
+	for _, o := range strings.Split(cfg.AllowedOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			allowedOrigins[o] = true
+		}
+	}
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(logger.GinMiddleware(appLogger, cfg.Env))
+	r.Use(func(c *gin.Context) {
+		origin := c.Request.Header.Get("Origin")
+		if allowedOrigins[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type")
+			c.Header("Access-Control-Max-Age", "86400")
+		}
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
 	r.SetTrustedProxies(nil)
 
 	routes.Register(r, routes.Deps{

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/brimble/paas/entities"
 	"github.com/brimble/paas/pkg/broker"
@@ -158,19 +159,24 @@ func (s *BuilderService) streamCommand(ctx context.Context, cmd *exec.Cmd, deplo
 }
 
 func (s *BuilderService) publishLine(ctx context.Context, deploymentID, phase, stream, content string) {
-	s.broker.Publish(deploymentID, broker.LogLine{
-		Phase:   phase,
-		Stream:  stream,
-		Content: content,
-	})
-	if err := s.sink.InsertLog(ctx, &entities.DeploymentLog{
+	log := &entities.DeploymentLog{
 		DeploymentID: deploymentID,
 		Stream:       stream,
 		Phase:        phase,
 		Content:      content,
-	}); err != nil {
-		logger.Error(err, "failed to persist log line", "deploymentID", deploymentID, "phase", phase)
 	}
+	if err := s.sink.InsertLog(ctx, log); err != nil {
+		logger.Error(err, "failed to persist log line", "deploymentID", deploymentID, "phase", phase)
+		return
+	}
+	s.broker.Publish(deploymentID, broker.LogLine{
+		ID:           log.ID,
+		DeploymentID: log.DeploymentID,
+		Timestamp:    log.Timestamp.Format(time.RFC3339),
+		Phase:        log.Phase,
+		Stream:       log.Stream,
+		Content:      log.Content,
+	})
 }
 
 func parseBuildInfo(path string) (*BuildInfo, error) {

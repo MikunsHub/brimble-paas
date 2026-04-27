@@ -27,6 +27,7 @@ func Register(r *gin.Engine, deps Deps) {
 			deploys.GET("", deployHandler.List)
 			deploys.GET("/:id", deployHandler.Get)
 			deploys.DELETE("/:id", deployHandler.Delete)
+			deploys.POST("/:id/restart", deployHandler.Restart)
 			deploys.GET("/:id/logs", deployHandler.GetLogs)
 			deploys.GET("/:id/logs/stream", deployHandler.StreamLogs)
 		}

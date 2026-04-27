@@ -9,8 +9,11 @@ type LogPublisher interface {
 
 // LogLine is a single log entry streamed from a build/deploy phase.
 type LogLine struct {
-	Index   int    `json:"index"`
-	Phase   string `json:"phase"`  // clone | build | deploy | health
-	Stream  string `json:"stream"` // stdout | stderr
-	Content string `json:"content"`
+	Index        int    `json:"index"`
+	ID           string `json:"id,omitempty"`
+	DeploymentID string `json:"deployment_id,omitempty"`
+	Timestamp    string `json:"timestamp,omitempty"`
+	Phase        string `json:"phase"`  // clone | build | deploy | health
+	Stream       string `json:"stream"` // stdout | stderr
+	Content      string `json:"content"`
 }
