@@ -72,6 +72,9 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+coverage.out
+coverage.html
+
 
 # Cache
 .eslintcache

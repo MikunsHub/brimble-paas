@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/brimble/paas/config"
-	"github.com/brimble/paas/internal/builder"
 	"github.com/brimble/paas/internal/caddy"
 	"github.com/brimble/paas/internal/deployment"
+	deploymentbuilder "github.com/brimble/paas/internal/deployment/builder"
 	"github.com/brimble/paas/internal/docker"
 	"github.com/brimble/paas/internal/routes"
 	s3client "github.com/brimble/paas/pkg/aws/s3"
@@ -35,7 +35,7 @@ func main() {
 
 	deploymentRepo := deployment.NewDeploymentRepo(db)
 
-	builderSvc := builder.NewBuilderService(cfg.BuildMode, logBroker, deploymentRepo)
+	builderSvc := deploymentbuilder.NewService(cfg.BuildMode, logBroker, deploymentRepo)
 	if err := builderSvc.Validate(); err != nil {
 		logger.Error(err, "builder validation failed")
 		os.Exit(1)

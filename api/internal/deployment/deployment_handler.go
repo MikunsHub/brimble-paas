@@ -93,7 +93,11 @@ func (h *Handler) Restart(c *gin.Context) {
 }
 
 func (h *Handler) GetLogs(c *gin.Context) {
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		h.BadRequest(c, "offset must be a valid integer")
+		return
+	}
 
 	logs, err := h.svc.GetLogs(c.Request.Context(), c.Param("id"), offset)
 	if err != nil {
@@ -110,7 +114,12 @@ func (h *Handler) GetLogs(c *gin.Context) {
 }
 
 func (h *Handler) StreamLogs(c *gin.Context) {
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		h.BadRequest(c, "offset must be a valid integer")
+		return
+	}
+
 	session, err := h.svc.OpenLogStream(c.Request.Context(), c.Param("id"), offset)
 	if err != nil {
 		h.HandleErr(c, err)

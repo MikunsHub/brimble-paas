@@ -2,7 +2,6 @@ package broker
 
 import "sync"
 
-// ChannelBroker is the default in-process broker. Zero external deps.
 type ChannelBroker struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan LogLine
@@ -21,7 +20,6 @@ func (b *ChannelBroker) Publish(deploymentID string, line LogLine) error {
 		select {
 		case ch <- line:
 		default:
-			// Slow consumer — drop rather than block the pipeline
 		}
 	}
 	return nil
@@ -53,4 +51,4 @@ func (b *ChannelBroker) Subscribe(deploymentID string) (<-chan LogLine, func(), 
 	return ch, unsubscribe, nil
 }
 
-var _ LogPublisher = (*ChannelBroker)(nil) // compile-time interface check
+var _ LogPublisher = (*ChannelBroker)(nil)

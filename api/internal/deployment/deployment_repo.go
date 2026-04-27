@@ -37,7 +37,10 @@ func (r *postgresRepo) GetByID(ctx context.Context, id string) (*entities.Deploy
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
-	return &d, err
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 func (r *postgresRepo) List(ctx context.Context) ([]*entities.Deployment, error) {
@@ -58,15 +61,10 @@ func (r *postgresRepo) Delete(ctx context.Context, id string) error {
 		Delete(&entities.Deployment{}).Error
 }
 
-// ── Deployment logs ───────────────────────────────────────────────────────────
-
 func (r *postgresRepo) InsertLog(ctx context.Context, l *entities.DeploymentLog) error {
 	return r.db.WithContext(ctx).Create(l).Error
 }
 
-// GetLogs returns logs ordered by timestamp.
-// offset skips already-seen rows — used by the SSE handler to replay history
-// from a reconnect point without re-sending lines the client already received.
 func (r *postgresRepo) GetLogs(ctx context.Context, deploymentID string, offset int) ([]*entities.DeploymentLog, error) {
 	var logs []*entities.DeploymentLog
 	err := r.db.WithContext(ctx).

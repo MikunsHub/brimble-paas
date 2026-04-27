@@ -135,7 +135,6 @@ func (s *DockerService) WaitForHealthy(ctx context.Context, containerID string, 
 	}
 }
 
-// GetContainerLogs returns the last N lines of container output.
 func (s *DockerService) GetContainerLogs(ctx context.Context, containerID string) (string, error) {
 	options := container.LogsOptions{
 		ShowStdout: true,
@@ -163,9 +162,6 @@ func (s *DockerService) GetContainerLogs(ctx context.Context, containerID string
 	return result, nil
 }
 
-// StreamContainerLogs returns a followable log stream for the container.
-// The caller is responsible for closing the returned ReadCloser and
-// demultiplexing stdout/stderr with stdcopy.StdCopy.
 func (s *DockerService) StreamContainerLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
 	options := container.LogsOptions{
 		ShowStdout: true,

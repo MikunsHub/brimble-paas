@@ -1,8 +1,10 @@
-package naming
+package deployment
 
 import (
 	"fmt"
 	"math/rand"
+	"sync"
+	"time"
 )
 
 var adjectives = []string{
@@ -20,9 +22,21 @@ var nouns = []string{
 	"quest", "reef", "sage", "tide", "vale", "wind", "yarn",
 }
 
+var (
+	slugRandMu sync.Mutex
+	slugRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
+)
+
 func GenerateSubDomainSlug() string {
-	adj := adjectives[rand.Intn(len(adjectives))]
-	noun := nouns[rand.Intn(len(nouns))]
-	suffix := fmt.Sprintf("%04x", rand.Intn(65536))
+	slugRandMu.Lock()
+	defer slugRandMu.Unlock()
+
+	return generateSubDomainSlug(slugRand)
+}
+
+func generateSubDomainSlug(r *rand.Rand) string {
+	adj := adjectives[r.Intn(len(adjectives))]
+	noun := nouns[r.Intn(len(nouns))]
+	suffix := fmt.Sprintf("%04x", r.Intn(65536))
 	return fmt.Sprintf("%s-%s-%s", adj, noun, suffix)
 }

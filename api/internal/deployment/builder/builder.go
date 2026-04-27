@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,31 +26,59 @@ type BuildInfo struct {
 	StartCmd     string `json:"start_cmd"`
 }
 
-type BuilderService struct {
+type Service struct {
 	cfg    buildConfig
 	broker broker.LogPublisher
 	sink   LogSink
+	runner commandRunner
 }
 
 type buildConfig struct {
 	mode string
 }
 
-func NewBuilderService(mode string, b broker.LogPublisher, sink LogSink) *BuilderService {
-	return &BuilderService{
+type command interface {
+	StdoutPipe() (io.ReadCloser, error)
+	StderrPipe() (io.ReadCloser, error)
+	Start() error
+	Wait() error
+}
+
+type commandRunner interface {
+	CommandContext(ctx context.Context, name string, args ...string) command
+	LookPath(file string) (string, error)
+}
+
+type execRunner struct{}
+
+type execCommand struct {
+	*exec.Cmd
+}
+
+func NewService(mode string, b broker.LogPublisher, sink LogSink) *Service {
+	return &Service{
 		cfg:    buildConfig{mode: NormalizeMode(mode)},
 		broker: b,
 		sink:   sink,
+		runner: execRunner{},
 	}
 }
 
-func (s *BuilderService) Mode() string {
+func (r execRunner) CommandContext(ctx context.Context, name string, args ...string) command {
+	return execCommand{Cmd: exec.CommandContext(ctx, name, args...)}
+}
+
+func (r execRunner) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+
+func (s *Service) Mode() string {
 	return s.cfg.mode
 }
 
-func (s *BuilderService) Clone(ctx context.Context, gitURL, destDir, deploymentID string) error {
+func (s *Service) Clone(ctx context.Context, gitURL, destDir, deploymentID string) error {
 	logger.Info("cloning repository", "deploymentID", deploymentID, "gitURL", gitURL)
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", gitURL, destDir)
+	cmd := s.runner.CommandContext(ctx, "git", "clone", "--depth", "1", gitURL, destDir)
 	if err := s.streamCommand(ctx, cmd, deploymentID, "clone"); err != nil {
 		return fmt.Errorf("git clone failed: %w", err)
 	}
@@ -57,7 +86,7 @@ func (s *BuilderService) Clone(ctx context.Context, gitURL, destDir, deploymentI
 	return nil
 }
 
-func (s *BuilderService) Build(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
+func (s *Service) Build(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
 	switch s.cfg.mode {
 	case "prod":
 		return s.buildProd(ctx, sourceDir, imageTag, deploymentID)
@@ -66,10 +95,10 @@ func (s *BuilderService) Build(ctx context.Context, sourceDir, imageTag, deploym
 	}
 }
 
-func (s *BuilderService) buildDev(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
+func (s *Service) buildDev(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
 	logger.Info("building (dev mode)", "deploymentID", deploymentID, "sourceDir", sourceDir, "imageTag", imageTag)
 
-	cmd := exec.CommandContext(ctx, "railpack", "build", sourceDir, "--name", imageTag)
+	cmd := s.runner.CommandContext(ctx, "railpack", "build", sourceDir, "--name", imageTag)
 	if err := s.streamCommand(ctx, cmd, deploymentID, "build"); err != nil {
 		return nil, fmt.Errorf("railpack build failed: %w", err)
 	}
@@ -78,14 +107,13 @@ func (s *BuilderService) buildDev(ctx context.Context, sourceDir, imageTag, depl
 	return &BuildInfo{}, nil
 }
 
-func (s *BuilderService) buildProd(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
+func (s *Service) buildProd(ctx context.Context, sourceDir, imageTag, deploymentID string) (*BuildInfo, error) {
 	logger.Info("building (prod mode)", "deploymentID", deploymentID, "sourceDir", sourceDir, "imageTag", imageTag)
 
 	planPath := filepath.Join(sourceDir, "railpack-plan.json")
 	infoPath := filepath.Join(sourceDir, "railpack-info.json")
 
-	// Stage 1: railpack prepare
-	prepareCmd := exec.CommandContext(ctx, "railpack", "prepare", sourceDir,
+	prepareCmd := s.runner.CommandContext(ctx, "railpack", "prepare", sourceDir,
 		"--plan-out", planPath,
 		"--info-out", infoPath,
 	)
@@ -99,7 +127,7 @@ func (s *BuilderService) buildProd(ctx context.Context, sourceDir, imageTag, dep
 		info = &BuildInfo{}
 	}
 
-	buildCmd := exec.CommandContext(ctx,
+	buildCmd := s.runner.CommandContext(ctx,
 		"docker", "buildx", "build",
 		"--build-arg", "BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend",
 		"-f", planPath,
@@ -116,7 +144,7 @@ func (s *BuilderService) buildProd(ctx context.Context, sourceDir, imageTag, dep
 	return info, nil
 }
 
-func (s *BuilderService) streamCommand(ctx context.Context, cmd *exec.Cmd, deploymentID, phase string) error {
+func (s *Service) streamCommand(ctx context.Context, cmd command, deploymentID, phase string) error {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
@@ -158,7 +186,7 @@ func (s *BuilderService) streamCommand(ctx context.Context, cmd *exec.Cmd, deplo
 	return nil
 }
 
-func (s *BuilderService) publishLine(ctx context.Context, deploymentID, phase, stream, content string) {
+func (s *Service) publishLine(ctx context.Context, deploymentID, phase, stream, content string) {
 	log := &entities.DeploymentLog{
 		DeploymentID: deploymentID,
 		Stream:       stream,
@@ -202,7 +230,6 @@ func parseBuildInfo(path string) (*BuildInfo, error) {
 		info.StartCmd = startCmd
 	}
 
-	// Also check nested structures Railpack might produce
 	if v, ok := raw["name"].(string); ok && info.DetectedLang == "" {
 		info.DetectedLang = v
 	}
@@ -220,22 +247,22 @@ func CleanSourceDir(sourceDir string) {
 	}
 }
 
-func (s *BuilderService) Validate() error {
-	if _, err := exec.LookPath("git"); err != nil {
+func (s *Service) Validate() error {
+	if _, err := s.runner.LookPath("git"); err != nil {
 		return fmt.Errorf("git not found in PATH: %w", err)
 	}
-	if _, err := exec.LookPath("railpack"); err != nil {
+	if _, err := s.runner.LookPath("railpack"); err != nil {
 		return fmt.Errorf("railpack CLI not found in PATH: %w", err)
 	}
 	if s.cfg.mode == "prod" {
-		if _, err := exec.LookPath("docker"); err != nil {
+		if _, err := s.runner.LookPath("docker"); err != nil {
 			return fmt.Errorf("docker CLI not found in PATH (required for prod build mode): %w", err)
 		}
 	}
 	return nil
 }
 
-func (s *BuilderService) String() string {
+func (s *Service) String() string {
 	switch s.cfg.mode {
 	case "prod":
 		return "production (railpack prepare + docker buildx build)"
@@ -244,11 +271,11 @@ func (s *BuilderService) String() string {
 	}
 }
 
-func (s *BuilderService) IsDevMode() bool {
+func (s *Service) IsDevMode() bool {
 	return s.cfg.mode != "prod"
 }
 
-func (s *BuilderService) IsProdMode() bool {
+func (s *Service) IsProdMode() bool {
 	return s.cfg.mode == "prod"
 }
 

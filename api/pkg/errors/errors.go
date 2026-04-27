@@ -1,10 +1,6 @@
 package apperrors
 
 import "net/http"
-
-// AppError is a typed error that carries an HTTP status code.
-// Services return these so handlers can respond with the correct status
-// without manual code-to-status mapping at every call site.
 type AppError struct {
 	Code    int
 	Message string

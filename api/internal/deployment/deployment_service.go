@@ -14,11 +14,6 @@ import (
 
 	"github.com/brimble/paas/config"
 	"github.com/brimble/paas/entities"
-	"github.com/brimble/paas/internal/builder"
-	"github.com/brimble/paas/internal/caddy"
-	"github.com/brimble/paas/internal/docker"
-	"github.com/brimble/paas/internal/naming"
-	s3client "github.com/brimble/paas/pkg/aws/s3"
 	"github.com/brimble/paas/pkg/broker"
 	apperrors "github.com/brimble/paas/pkg/errors"
 	"github.com/brimble/paas/pkg/logger"
@@ -39,9 +34,9 @@ type Service interface {
 type deploymentService struct {
 	repo       Repository
 	broker     broker.LogPublisher
-	builderSvc *builder.BuilderService
-	dockerSvc  *docker.DockerService
-	caddySvc   *caddy.CaddyService
+	builderSvc Builder
+	dockerSvc  DockerManager
+	caddySvc   Router
 	s3         s3API
 	cfg        *config.Config
 }
@@ -56,10 +51,10 @@ type s3API interface {
 func NewDeploymentService(
 	repo Repository,
 	b broker.LogPublisher,
-	builderSvc *builder.BuilderService,
-	dockerSvc *docker.DockerService,
-	caddySvc *caddy.CaddyService,
-	s3 *s3client.Client,
+	builderSvc Builder,
+	dockerSvc DockerManager,
+	caddySvc Router,
+	s3 s3API,
 	cfg *config.Config,
 ) Service {
 	return &deploymentService{
@@ -81,7 +76,7 @@ func (s *deploymentService) Create(ctx context.Context, req CreateDeploymentRequ
 	}
 
 	d := &entities.Deployment{
-		Subdomain: naming.GenerateSubDomainSlug(),
+		Subdomain: GenerateSubDomainSlug(),
 		Status:    entities.StatusPending,
 	}
 	if hasGitURL {
@@ -105,7 +100,7 @@ func (s *deploymentService) Create(ctx context.Context, req CreateDeploymentRequ
 
 	logger.Info("deployment created", "id", d.ID, "subdomain", d.Subdomain)
 
-	go s.runPipeline(d)
+	go s.runPipeline(cloneDeployment(d))
 
 	return d, nil
 }
@@ -216,9 +211,9 @@ func (s *deploymentService) Restart(ctx context.Context, id string) (*entities.D
 	}
 
 	if d.ImageTag != nil {
-		go s.runFromImage(d)
+		go s.runFromImage(cloneDeployment(d))
 	} else {
-		go s.runPipeline(d)
+		go s.runPipeline(cloneDeployment(d))
 	}
 
 	logger.Info("deployment restart initiated", "id", id)
@@ -861,4 +856,13 @@ func shouldSkipDeploymentLog(phase, content string) bool {
 	}
 
 	return false
+}
+
+func cloneDeployment(d *entities.Deployment) *entities.Deployment {
+	if d == nil {
+		return nil
+	}
+
+	copy := *d
+	return &copy
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -66,7 +67,6 @@ func (h *BaseHandler) BindJSON(c *gin.Context, req any) bool {
 	return true
 }
 
-
 func formatBindError(err error) string {
 	if valErrs, ok := err.(validator.ValidationErrors); ok {
 		return formatValidationErrors(valErrs)
@@ -76,6 +76,9 @@ func formatBindError(err error) string {
 		return fmt.Sprintf("%s expected %s but got %s", friendlyField(field), jsonErr.Type, jsonErr.Value)
 	}
 	if _, ok := err.(*json.SyntaxError); ok {
+		return "invalid JSON in request body"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return "invalid JSON in request body"
 	}
 	return err.Error()
@@ -109,14 +112,35 @@ func formatValidationErrors(errs validator.ValidationErrors) string {
 }
 
 func friendlyField(field string) string {
+	runes := []rune(field)
+	if len(runes) == 0 {
+		return ""
+	}
+
 	var b strings.Builder
-	for i, r := range field {
-		if i > 0 && r >= 'A' && r <= 'Z' {
+	for i, r := range runes {
+		if i > 0 && r >= 'A' && r <= 'Z' && shouldSplitBeforeUpper(runes, i) {
 			b.WriteRune(' ')
 		}
 		b.WriteRune(r)
 	}
 	return strings.ToLower(b.String())
+}
+
+func shouldSplitBeforeUpper(runes []rune, i int) bool {
+	prev := runes[i-1]
+	if prev >= 'a' && prev <= 'z' {
+		return true
+	}
+
+	if i+1 < len(runes) {
+		next := runes[i+1]
+		if prev >= 'A' && prev <= 'Z' && next >= 'a' && next <= 'z' {
+			return true
+		}
+	}
+
+	return false
 }
 
 func lastSegment(s, sep string) string {
