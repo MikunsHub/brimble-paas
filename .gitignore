@@ -40,3 +40,41 @@ skills-lock.json
 
 test_static
 postman
+test_vue
+
+# Node.js / Frontend
+node_modules/
+dist/
+build/
+.vite/
+
+# Environment files
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+
+# Cache
+.eslintcache
+*.tsbuildinfo
+
+*.zip
